@@ -47,6 +47,8 @@ enum Commands {
     Verify,
     /// Show project status: features, context, progress
     Status,
+    /// Install/update project dependencies (skills, CLAUDE.md, permissions)
+    Install,
     /// Stop all running agents gracefully
     Stop,
     /// Show agent logs
@@ -65,6 +67,7 @@ fn main() {
 
     match cli.command {
         Commands::Init { description } => cmd_init(&cli.project, &description),
+        Commands::Install => cmd_install(&cli.project),
         Commands::Run {
             agents,
             max_sessions,
@@ -96,6 +99,58 @@ fn cmd_init(project_dir: &PathBuf, description: &str) {
             println!("  1. Write DESIGN.md with your project design");
             println!("  2. Run /forge-planning in Claude Code to generate features");
             println!("  3. Run `forge run` to start the development loop");
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_install(project_dir: &PathBuf) {
+    match init::install_project(project_dir) {
+        Ok(()) => {
+            println!("Installed forge project in {}", project_dir.display());
+            println!();
+            println!("Updated:");
+            println!("  .claude/skills/         skills reinstalled from binary");
+            println!("  CLAUDE.md               regenerated from forge.toml");
+            println!("  AGENTS.md               regenerated from forge.toml");
+            println!("  context/                directories ensured");
+            println!("  scripts/verify/         scripts marked executable");
+            println!();
+
+            // Check backend CLIs
+            let config = config::ForgeConfig::load(project_dir).unwrap_or_else(|_| {
+                config::ForgeConfig::scaffold("unknown", "")
+            });
+
+            let mut backends = std::collections::BTreeSet::new();
+            backends.insert(config.forge.roles.protocol.backend.as_str());
+            backends.insert(config.forge.roles.orchestrating.backend.as_str());
+            backends.insert(config.forge.roles.planning.backend.as_str());
+            backends.insert(config.forge.roles.adjusting.backend.as_str());
+
+            let mut missing = Vec::new();
+            for backend in &backends {
+                if std::process::Command::new(backend)
+                    .arg("--version")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_err()
+                {
+                    missing.push(*backend);
+                }
+            }
+
+            if missing.is_empty() {
+                println!("Backends: all OK ({})", backends.into_iter().collect::<Vec<_>>().join(", "));
+            } else {
+                for name in &missing {
+                    eprintln!("Warning: backend '{}' not found in PATH", name);
+                }
+            }
         }
         Err(e) => {
             eprintln!("Error: {e}");

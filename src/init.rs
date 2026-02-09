@@ -55,8 +55,48 @@ pub fn init_project(project_dir: &Path, description: &str) -> Result<(), InitErr
     Ok(())
 }
 
+/// Install/update an existing forge project: skills, CLAUDE.md, directories, permissions.
+pub fn install_project(project_dir: &Path) -> Result<(), InitError> {
+    let config = ForgeConfig::load(project_dir)?;
+
+    // Install/update skills
+    install_skills(project_dir)?;
+
+    // Regenerate CLAUDE.md and AGENTS.md from current config
+    let claude_md = template::generate_claude_md(&config);
+    std::fs::write(project_dir.join("CLAUDE.md"), &claude_md)?;
+    std::fs::write(project_dir.join("AGENTS.md"), &claude_md)?;
+
+    // Ensure directories exist
+    let ctx = ContextManager::new(project_dir);
+    ctx.init()?;
+    std::fs::create_dir_all(project_dir.join("feedback"))?;
+    std::fs::create_dir_all(project_dir.join("scripts/verify"))?;
+    std::fs::create_dir_all(project_dir.join(".forge"))?;
+
+    // chmod +x on verify scripts
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let verify_dir = project_dir.join("scripts/verify");
+        if verify_dir.is_dir() {
+            for entry in std::fs::read_dir(&verify_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("sh") {
+                    let mut perms = std::fs::metadata(&path)?.permissions();
+                    perms.set_mode(perms.mode() | 0o111);
+                    std::fs::set_permissions(&path, perms)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Install all forge skills into .claude/skills/.
-fn install_skills(project_dir: &Path) -> Result<(), std::io::Error> {
+pub fn install_skills(project_dir: &Path) -> Result<(), std::io::Error> {
     for (skill_name, files) in skills::all_skills() {
         let skill_dir = project_dir.join(".claude/skills").join(skill_name);
         std::fs::create_dir_all(&skill_dir)?;
@@ -185,5 +225,67 @@ mod tests {
         init_project(dir.path(), "test").unwrap();
         let features = crate::features::FeatureList::load(dir.path()).unwrap();
         assert!(features.features.is_empty());
+    }
+
+    #[test]
+    fn install_on_existing_project() {
+        let dir = tempfile::tempdir().unwrap();
+        init_project(dir.path(), "test").unwrap();
+
+        // Delete skills
+        std::fs::remove_dir_all(dir.path().join(".claude/skills")).unwrap();
+        assert!(!dir.path().join(".claude/skills/forge-planning/SKILL.md").exists());
+
+        // Install restores them
+        install_project(dir.path()).unwrap();
+        assert!(dir.path().join(".claude/skills/forge-planning/SKILL.md").exists());
+        assert!(dir.path().join(".claude/skills/forge-protocol/SKILL.md").exists());
+        assert!(dir.path().join(".claude/skills/forge-orchestrating/SKILL.md").exists());
+        assert!(dir.path().join(".claude/skills/forge-adjusting/SKILL.md").exists());
+    }
+
+    #[test]
+    fn install_regenerates_claude_md() {
+        let dir = tempfile::tempdir().unwrap();
+        init_project(dir.path(), "test").unwrap();
+
+        // Modify the config name
+        let mut config = ForgeConfig::load(dir.path()).unwrap();
+        config.project.name = "renamed-project".into();
+        config.save(dir.path()).unwrap();
+
+        // Install regenerates CLAUDE.md with updated name
+        install_project(dir.path()).unwrap();
+        let claude = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+        assert!(claude.contains("# renamed-project"));
+        let agents = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        assert!(agents.contains("# renamed-project"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_fixes_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        init_project(dir.path(), "test").unwrap();
+
+        // Create a script without +x
+        let script = dir.path().join("scripts/verify/check.sh");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        let perms = std::fs::Permissions::from_mode(0o644);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        // Install should fix permissions
+        install_project(dir.path()).unwrap();
+        let mode = std::fs::metadata(&script).unwrap().permissions().mode();
+        assert!(mode & 0o111 != 0, "script should be executable after install");
+    }
+
+    #[test]
+    fn install_fails_without_forge_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = install_project(dir.path());
+        assert!(result.is_err());
     }
 }
