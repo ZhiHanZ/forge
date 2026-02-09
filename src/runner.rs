@@ -484,18 +484,13 @@ fn merge_worktree(repo_dir: &Path, _wt_dir: &Path, branch: &str) -> Result<(), S
     Ok(())
 }
 
-/// Spawn an agent child process using the role's backend + model.
-fn spawn_agent(
-    role: &RoleSpec,
-    project_dir: &Path,
-    prompt: &str,
-    agent_id: &str,
-) -> Result<Child, std::io::Error> {
-    let (cmd, args): (&str, Vec<String>) = match role.backend.as_str() {
+/// Build the command and arguments for spawning an agent interactively (no --print/exec).
+/// Used by the TUI --watch mode to spawn agents in a PTY.
+pub fn build_agent_command(role: &RoleSpec, prompt: &str) -> (String, Vec<String>) {
+    match role.backend.as_str() {
         "claude" => (
-            "claude",
+            "claude".to_string(),
             vec![
-                "--print".to_string(),
                 "--model".to_string(),
                 role.model.clone(),
                 "--dangerously-skip-permissions".to_string(),
@@ -503,22 +498,39 @@ fn spawn_agent(
             ],
         ),
         "codex" => (
-            "codex",
+            "codex".to_string(),
             vec![
-                "exec".to_string(),
                 "--model".to_string(),
                 role.model.clone(),
                 "--full-auto".to_string(),
                 prompt.to_string(),
             ],
         ),
-        _ => {
-            // Custom backend: treat command name as the binary
-            (&role.backend, vec![prompt.to_string()])
-        }
-    };
+        _ => (role.backend.clone(), vec![prompt.to_string()]),
+    }
+}
 
-    Command::new(cmd)
+/// Spawn an agent child process using the role's backend + model.
+fn spawn_agent(
+    role: &RoleSpec,
+    project_dir: &Path,
+    prompt: &str,
+    agent_id: &str,
+) -> Result<Child, std::io::Error> {
+    let (cmd, mut args) = build_agent_command(role, prompt);
+
+    // For headless mode, add --print (claude) or exec prefix (codex)
+    match role.backend.as_str() {
+        "claude" => {
+            args.insert(0, "--print".to_string());
+        }
+        "codex" => {
+            args.insert(0, "exec".to_string());
+        }
+        _ => {}
+    }
+
+    Command::new(&cmd)
         .args(&args)
         .current_dir(project_dir)
         .stdout(Stdio::piped())

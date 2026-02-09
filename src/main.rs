@@ -6,6 +6,8 @@ mod init;
 mod runner;
 mod skills;
 mod template;
+mod tui;
+mod tui_orchestrator;
 mod verify;
 
 use clap::{Parser, Subcommand};
@@ -77,10 +79,10 @@ fn main() {
         Commands::Run {
             agents,
             max_sessions,
-            watch: _,
+            watch,
             backend,
             model,
-        } => cmd_run(&cli.project, agents, max_sessions, backend, model),
+        } => cmd_run(&cli.project, agents, max_sessions, watch, backend, model),
         Commands::Verify => cmd_verify(&cli.project),
         Commands::Status => cmd_status(&cli.project),
         Commands::Stop => cmd_stop(&cli.project),
@@ -173,6 +175,7 @@ fn cmd_run(
     project_dir: &PathBuf,
     agents: usize,
     max_sessions: usize,
+    watch: bool,
     backend: Option<String>,
     model: Option<String>,
 ) {
@@ -200,12 +203,6 @@ fn cmd_run(
         orchestrating.model = m.clone();
     }
 
-    println!(
-        "forge run: {} agent(s), backend={}, model={}, max_sessions={}",
-        agents, protocol.backend, protocol.model, max_sessions
-    );
-    println!();
-
     let run_config = runner::RunConfig {
         project_dir: project_dir.clone(),
         protocol,
@@ -213,6 +210,25 @@ fn cmd_run(
         max_sessions,
         num_agents: agents,
     };
+
+    if watch {
+        // TUI mode: spawn agents in interactive PTY panes
+        let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+        rt.block_on(async {
+            if let Err(e) = tui::run_tui(&run_config).await {
+                eprintln!("TUI error: {e}");
+                std::process::exit(1);
+            }
+        });
+        return;
+    }
+
+    // Headless mode (original behavior)
+    println!(
+        "forge run: {} agent(s), backend={}, model={}, max_sessions={}",
+        agents, run_config.protocol.backend, run_config.protocol.model, max_sessions
+    );
+    println!();
 
     let outcome = if agents > 1 {
         runner::run_multi_agent(&run_config)
