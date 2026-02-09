@@ -19,12 +19,6 @@ use crate::config::RoleSpec;
 use crate::features::{FeatureList, StatusCounts};
 use crate::runner::{self, RunConfig};
 
-#[derive(Debug, Clone, Copy)]
-struct Size {
-    cols: u16,
-    rows: u16,
-}
-
 struct PtyPane {
     parser: Arc<RwLock<vt100::Parser>>,
     sender: Sender<Bytes>,
@@ -36,7 +30,8 @@ struct PtyPane {
 
 impl PtyPane {
     fn new(
-        size: Size,
+        rows: u16,
+        cols: u16,
         cmd: CommandBuilder,
         feature_id: Option<String>,
         agent_id: String,
@@ -44,18 +39,14 @@ impl PtyPane {
         let pty_system = native_pty_system();
         let pty_pair = pty_system
             .openpty(PtySize {
-                rows: size.rows.saturating_sub(2),
-                cols: size.cols.saturating_sub(2),
+                rows,
+                cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
-        let parser = Arc::new(RwLock::new(vt100::Parser::new(
-            size.rows.saturating_sub(2),
-            size.cols.saturating_sub(2),
-            0,
-        )));
+        let parser = Arc::new(RwLock::new(vt100::Parser::new(rows, cols, 0)));
         let exited = Arc::new(AtomicBool::new(false));
 
         // Spawn the child process on the slave side of the PTY
@@ -122,15 +113,20 @@ impl PtyPane {
         })
     }
 
-    fn resize(&self, size: Size) {
-        let rows = size.rows.saturating_sub(2);
-        let cols = size.cols.saturating_sub(2);
+    /// Resize the PTY and vt100 parser to match the given inner area (content area inside borders).
+    fn resize_to_inner(&self, inner: Rect) {
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
         if let Ok(mut parser) = self.parser.write() {
-            parser.screen_mut().set_size(rows, cols);
+            let screen = parser.screen();
+            if screen.size() != (inner.height, inner.width) {
+                parser.screen_mut().set_size(inner.height, inner.width);
+            }
         }
         let _ = self.master_pty.resize(PtySize {
-            rows,
-            cols,
+            rows: inner.height,
+            cols: inner.width,
             pixel_width: 0,
             pixel_height: 0,
         });
@@ -143,7 +139,8 @@ impl PtyPane {
 
 /// Spawn a PTY pane running an agent with the given role and prompt.
 fn spawn_pty_agent(
-    size: Size,
+    rows: u16,
+    cols: u16,
     role: &RoleSpec,
     project_dir: &Path,
     prompt: &str,
@@ -159,14 +156,15 @@ fn spawn_pty_agent(
     cmd.cwd(project_dir);
     cmd.env("FORGE_AGENT_ID", agent_id);
 
-    PtyPane::new(size, cmd, feature_id, agent_id.to_string())
+    PtyPane::new(rows, cols, cmd, feature_id, agent_id.to_string())
 }
 
 /// Open a new pane for the next claimable feature. Returns the feature ID if found.
 fn open_next_feature_pane(
     panes: &mut Vec<PtyPane>,
     active_pane: &mut Option<usize>,
-    size: Size,
+    inner_rows: u16,
+    inner_cols: u16,
     config: &RunConfig,
 ) -> Option<String> {
     let mut features = FeatureList::load(&config.project_dir).ok()?;
@@ -185,7 +183,8 @@ fn open_next_feature_pane(
     );
 
     match spawn_pty_agent(
-        size,
+        inner_rows,
+        inner_cols,
         &config.protocol,
         &config.project_dir,
         &prompt,
@@ -272,20 +271,6 @@ fn cleanup_exited_panes(panes: &mut Vec<PtyPane>, active_pane: &mut Option<usize
     }
 }
 
-fn calc_pane_size(size: Size, nr_panes: usize) -> Size {
-    let nr = std::cmp::max(nr_panes, 1) as u16;
-    Size {
-        rows: size.rows.saturating_sub(3) / nr,
-        cols: size.cols,
-    }
-}
-
-fn resize_all_panes(panes: &mut [PtyPane], size: Size) {
-    for pane in panes.iter() {
-        pane.resize(size);
-    }
-}
-
 fn load_status_counts(project_dir: &Path) -> StatusCounts {
     FeatureList::load(project_dir)
         .map(|f| f.status_counts())
@@ -324,6 +309,22 @@ fn render_status_bar(counts: &StatusCounts, area: Rect, frame: &mut ratatui::Fra
     frame.render_widget(paragraph, area);
 }
 
+/// Build layout constraints that split pane_area evenly among N panes.
+fn pane_constraints(n: usize) -> Vec<Constraint> {
+    (0..n).map(|i| {
+        Constraint::Ratio(1, n as u32)
+    }).collect()
+}
+
+/// Estimate the inner area for initial PTY size (before first draw).
+/// Block with Borders::ALL takes 1 row top + 1 row bottom, 1 col left + 1 col right.
+fn estimate_inner(total_rows: u16, total_cols: u16, nr_panes: u16) -> (u16, u16) {
+    let pane_rows = total_rows.saturating_sub(1) / std::cmp::max(nr_panes, 1); // -1 for status bar
+    let inner_rows = pane_rows.saturating_sub(2); // -2 for top+bottom border
+    let inner_cols = total_cols.saturating_sub(2); // -2 for left+right border
+    (std::cmp::max(inner_rows, 1), std::cmp::max(inner_cols, 1))
+}
+
 /// Main TUI entry point. Spawns agents in PTY panes and renders them.
 pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
     // Set up panic hook to restore terminal
@@ -334,19 +335,16 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
 
     let mut terminal = ratatui::init();
 
-    let mut size = Size {
-        rows: terminal.size()?.height,
-        cols: terminal.size()?.width,
-    };
+    let term_size = terminal.size()?;
 
     let mut panes: Vec<PtyPane> = Vec::new();
     let mut active_pane: Option<usize> = None;
     let mut status_counts = load_status_counts(&config.project_dir);
     let mut status_tick = 0u32;
 
-    // Open first pane with the next claimable feature
-    let pane_size = calc_pane_size(size, 1);
-    open_next_feature_pane(&mut panes, &mut active_pane, pane_size, config);
+    // Open first pane with estimated inner size
+    let (est_rows, est_cols) = estimate_inner(term_size.height, term_size.width, 1);
+    open_next_feature_pane(&mut panes, &mut active_pane, est_rows, est_cols, config);
 
     if panes.is_empty() {
         ratatui::restore();
@@ -358,13 +356,13 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
 
     loop {
         terminal.draw(|frame| {
-            let chunks = Layout::default()
+            let outer = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(1), Constraint::Length(1)])
                 .split(frame.area());
 
-            let pane_area = chunks[0];
-            let status_area = chunks[1];
+            let pane_area = outer[0];
+            let status_area = outer[1];
 
             if panes.is_empty() {
                 let msg = Paragraph::new("No active panes. Press Ctrl+N to spawn an agent or Ctrl+Q to quit.")
@@ -372,10 +370,15 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
                     .style(Style::default().fg(Color::Yellow));
                 frame.render_widget(msg, pane_area);
             } else {
-                let nr_panes = panes.len() as u16;
-                let pane_height = pane_area.height / std::cmp::max(nr_panes, 1);
+                // Use ratatui Layout to split evenly — no manual Rect math
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints(pane_constraints(panes.len()))
+                    .split(pane_area);
 
                 for (index, pane) in panes.iter().enumerate() {
+                    let chunk = chunks[index];
+
                     let title = match &pane.feature_id {
                         Some(fid) => format!(" {} — {} ", pane.agent_id, fid),
                         None => format!(" {} ", pane.agent_id),
@@ -395,28 +398,21 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
                         .title(title)
                         .style(border_style);
 
+                    // Resize parser+PTY to match the actual inner content area
+                    let inner = block.inner(chunk);
+                    pane.resize_to_inner(inner);
+
                     let mut cursor = Cursor::default();
                     if !is_active {
                         cursor.hide();
                     }
-
-                    let pane_chunk = Rect {
-                        x: pane_area.x,
-                        y: pane_area.y + (index as u16 * pane_height),
-                        width: pane_area.width,
-                        height: if index as u16 == nr_panes - 1 {
-                            pane_area.height - (index as u16 * pane_height)
-                        } else {
-                            pane_height
-                        },
-                    };
 
                     if let Ok(parser) = pane.parser.read() {
                         let screen = parser.screen();
                         let pseudo_term = PseudoTerminal::new(screen)
                             .block(block)
                             .cursor(cursor);
-                        frame.render_widget(pseudo_term, pane_chunk);
+                        frame.render_widget(pseudo_term, chunk);
                     }
                 }
             }
@@ -433,9 +429,11 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
                     }
                     // Ctrl+N: spawn new agent pane
                     KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let pane_size = calc_pane_size(size, panes.len() + 1);
-                        resize_all_panes(&mut panes, pane_size);
-                        open_next_feature_pane(&mut panes, &mut active_pane, pane_size, config);
+                        let ts = terminal.size()?;
+                        let nr = panes.len() as u16 + 1;
+                        let (r, c) = estimate_inner(ts.height, ts.width, nr);
+                        open_next_feature_pane(&mut panes, &mut active_pane, r, c, config);
+                        // Existing panes will be resized on next draw() via resize_to_inner
                     }
                     // Ctrl+X: close active pane
                     KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -446,8 +444,7 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
                             } else {
                                 active_pane = Some(idx % panes.len());
                             }
-                            let pane_size = calc_pane_size(size, panes.len());
-                            resize_all_panes(&mut panes, pane_size);
+                            // Remaining panes resized on next draw()
                         }
                     }
                     // Alt+K: previous pane
@@ -473,11 +470,8 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
                         }
                     }
                 },
-                Event::Resize(cols, rows) => {
-                    size.rows = rows;
-                    size.cols = cols;
-                    let pane_size = calc_pane_size(size, panes.len());
-                    resize_all_panes(&mut panes, pane_size);
+                Event::Resize(_, _) => {
+                    // Panes will be resized on next draw() via resize_to_inner
                 }
                 _ => {}
             }
