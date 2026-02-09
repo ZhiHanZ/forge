@@ -113,7 +113,7 @@ impl PtyPane {
         })
     }
 
-    /// Resize the PTY and vt100 parser to match the given inner area (content area inside borders).
+    /// Resize the PTY and vt100 parser to match the given inner area.
     fn resize_to_inner(&self, inner: Rect) {
         if inner.width == 0 || inner.height == 0 {
             return;
@@ -159,7 +159,7 @@ fn spawn_pty_agent(
     PtyPane::new(rows, cols, cmd, feature_id, agent_id.to_string())
 }
 
-/// Open a new pane for the next claimable feature. Returns the feature ID if found.
+/// Open a new pane for the next claimable feature.
 fn open_next_feature_pane(
     panes: &mut Vec<PtyPane>,
     active_pane: &mut Option<usize>,
@@ -201,7 +201,7 @@ fn open_next_feature_pane(
     }
 }
 
-/// Route keyboard input to a PTY pane. Returns true if the event was handled.
+/// Route keyboard input to a PTY pane.
 async fn handle_pane_key_event(pane: &mut PtyPane, key: &KeyEvent) -> bool {
     let input_bytes = match key.code {
         KeyCode::Char(ch) => {
@@ -277,7 +277,12 @@ fn load_status_counts(project_dir: &Path) -> StatusCounts {
         .unwrap_or_default()
 }
 
-fn render_status_bar(counts: &StatusCounts, area: Rect, frame: &mut ratatui::Frame) {
+fn render_status_bar(
+    counts: &StatusCounts,
+    command_mode: bool,
+    area: Rect,
+    frame: &mut ratatui::Frame,
+) {
     let pct = if counts.total > 0 {
         (counts.done as f64 / counts.total as f64) * 100.0
     } else {
@@ -289,40 +294,68 @@ fn render_status_bar(counts: &StatusCounts, area: Rect, frame: &mut ratatui::Fra
         counts.done, counts.total, counts.pending, counts.claimed, counts.blocked,
     );
 
-    let help_text = " Ctrl+↑↓: switch | Ctrl+N: new | Ctrl+X: close | Ctrl+Q: quit ";
-
-    let bar = Line::from(vec![
-        Span::styled(
-            status_text,
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            help_text,
-            Style::default().fg(Color::Gray).bg(Color::DarkGray),
-        ),
-    ]);
-
-    let paragraph = Paragraph::new(bar).alignment(Alignment::Left);
-    frame.render_widget(paragraph, area);
+    if command_mode {
+        let bar = Line::from(vec![
+            Span::styled(
+                status_text,
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " CMD ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " j/k:switch  n:new  x:close  q:quit  esc:cancel ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .bg(Color::DarkGray),
+            ),
+        ]);
+        let paragraph = Paragraph::new(bar).alignment(Alignment::Left);
+        frame.render_widget(paragraph, area);
+    } else {
+        let bar = Line::from(vec![
+            Span::styled(
+                status_text,
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " Ctrl+G: command mode ",
+                Style::default().fg(Color::Gray).bg(Color::DarkGray),
+            ),
+        ]);
+        let paragraph = Paragraph::new(bar).alignment(Alignment::Left);
+        frame.render_widget(paragraph, area);
+    }
 }
 
 /// Build layout constraints that split pane_area evenly among N panes.
 fn pane_constraints(n: usize) -> Vec<Constraint> {
-    (0..n).map(|i| {
-        Constraint::Ratio(1, n as u32)
-    }).collect()
+    (0..n)
+        .map(|_| Constraint::Ratio(1, n as u32))
+        .collect()
 }
 
 /// Estimate the inner area for initial PTY size (before first draw).
-/// Block with Borders::ALL takes 1 row top + 1 row bottom, 1 col left + 1 col right.
 fn estimate_inner(total_rows: u16, total_cols: u16, nr_panes: u16) -> (u16, u16) {
-    let pane_rows = total_rows.saturating_sub(1) / std::cmp::max(nr_panes, 1); // -1 for status bar
-    let inner_rows = pane_rows.saturating_sub(2); // -2 for top+bottom border
-    let inner_cols = total_cols.saturating_sub(2); // -2 for left+right border
+    let pane_rows = total_rows.saturating_sub(1) / std::cmp::max(nr_panes, 1);
+    let inner_rows = pane_rows.saturating_sub(2);
+    let inner_cols = total_cols.saturating_sub(2);
     (std::cmp::max(inner_rows, 1), std::cmp::max(inner_cols, 1))
+}
+
+/// Check if a key event is Ctrl+G (BEL, 0x07).
+fn is_ctrl_g(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('g') && key.modifiers == KeyModifiers::CONTROL
 }
 
 /// Main TUI entry point. Spawns agents in PTY panes and renders them.
@@ -341,6 +374,7 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
     let mut active_pane: Option<usize> = None;
     let mut status_counts = load_status_counts(&config.project_dir);
     let mut status_tick = 0u32;
+    let mut command_mode = false;
 
     // Open first pane with estimated inner size
     let (est_rows, est_cols) = estimate_inner(term_size.height, term_size.width, 1);
@@ -365,12 +399,13 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
             let status_area = outer[1];
 
             if panes.is_empty() {
-                let msg = Paragraph::new("No active panes. Press Ctrl+N to spawn an agent or Ctrl+Q to quit.")
-                    .alignment(Alignment::Center)
-                    .style(Style::default().fg(Color::Yellow));
+                let msg = Paragraph::new(
+                    "No active panes. Ctrl+G then n to spawn, or Ctrl+G then q to quit.",
+                )
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::Yellow));
                 frame.render_widget(msg, pane_area);
             } else {
-                // Use ratatui Layout to split evenly — no manual Rect math
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints(pane_constraints(panes.len()))
@@ -398,7 +433,6 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
                         .title(title)
                         .style(border_style);
 
-                    // Resize parser+PTY to match the actual inner content area
                     let inner = block.inner(chunk);
                     pane.resize_to_inner(inner);
 
@@ -417,61 +451,75 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
                 }
             }
 
-            render_status_bar(&status_counts, status_area, frame);
+            render_status_bar(&status_counts, command_mode, status_area, frame);
         })?;
 
         if event::poll(Duration::from_millis(10))? {
             match event::read()? {
-                Event::Key(key) => match key.code {
-                    // Ctrl+Q: quit
-                    KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        break;
-                    }
-                    // Ctrl+N: spawn new agent pane
-                    KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let ts = terminal.size()?;
-                        let nr = panes.len() as u16 + 1;
-                        let (r, c) = estimate_inner(ts.height, ts.width, nr);
-                        open_next_feature_pane(&mut panes, &mut active_pane, r, c, config);
-                        // Existing panes will be resized on next draw() via resize_to_inner
-                    }
-                    // Ctrl+X: close active pane
-                    KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if let Some(idx) = active_pane {
-                            panes.remove(idx);
-                            if panes.is_empty() {
-                                active_pane = None;
-                            } else {
-                                active_pane = Some(idx % panes.len());
+                Event::Key(key) => {
+                    if command_mode {
+                        // Command mode: interpret next key as a command, then return to normal
+                        command_mode = false;
+                        match key.code {
+                            // j or Down: next pane
+                            KeyCode::Char('j') | KeyCode::Down => {
+                                if let Some(idx) = active_pane {
+                                    if idx < panes.len().saturating_sub(1) {
+                                        active_pane = Some(idx + 1);
+                                    }
+                                }
                             }
-                            // Remaining panes resized on next draw()
-                        }
-                    }
-                    // Ctrl+Up: previous pane
-                    KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if let Some(idx) = active_pane {
-                            active_pane = Some(idx.saturating_sub(1));
-                        }
-                    }
-                    // Ctrl+Down: next pane
-                    KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if let Some(idx) = active_pane {
-                            if idx < panes.len().saturating_sub(1) {
-                                active_pane = Some(idx + 1);
+                            // k or Up: previous pane
+                            KeyCode::Char('k') | KeyCode::Up => {
+                                if let Some(idx) = active_pane {
+                                    active_pane = Some(idx.saturating_sub(1));
+                                }
                             }
+                            // n: new pane
+                            KeyCode::Char('n') => {
+                                let ts = terminal.size()?;
+                                let nr = panes.len() as u16 + 1;
+                                let (r, c) = estimate_inner(ts.height, ts.width, nr);
+                                open_next_feature_pane(
+                                    &mut panes,
+                                    &mut active_pane,
+                                    r,
+                                    c,
+                                    config,
+                                );
+                            }
+                            // x: close active pane
+                            KeyCode::Char('x') => {
+                                if let Some(idx) = active_pane {
+                                    panes.remove(idx);
+                                    if panes.is_empty() {
+                                        active_pane = None;
+                                    } else {
+                                        active_pane = Some(idx % panes.len());
+                                    }
+                                }
+                            }
+                            // q: quit
+                            KeyCode::Char('q') => {
+                                break;
+                            }
+                            // Esc or anything else: cancel command mode
+                            _ => {}
                         }
-                    }
-                    // Forward all other keys to the active pane
-                    _ => {
+                    } else if is_ctrl_g(&key) {
+                        // Enter command mode
+                        command_mode = true;
+                    } else {
+                        // Normal mode: forward everything to the active pane
                         if let Some(idx) = active_pane {
                             if idx < panes.len() {
                                 handle_pane_key_event(&mut panes[idx], &key).await;
                             }
                         }
                     }
-                },
+                }
                 Event::Resize(_, _) => {
-                    // Panes will be resized on next draw() via resize_to_inner
+                    // Panes resized on next draw() via resize_to_inner
                 }
                 _ => {}
             }
