@@ -338,18 +338,50 @@ fn render_status_bar(
     }
 }
 
-/// Build layout constraints that split pane_area evenly among N panes.
-fn pane_constraints(n: usize) -> Vec<Constraint> {
-    (0..n)
-        .map(|_| Constraint::Ratio(1, n as u32))
-        .collect()
+/// Compute grid dimensions for N panes.
+/// 1-3 panes: single column (vertical stack)
+/// 4+ panes: 2 columns, rows = ceil(n/2)
+fn grid_dims(n: usize) -> (usize, usize) {
+    if n <= 3 {
+        (n, 1) // rows, cols
+    } else {
+        let cols = 2;
+        let rows = (n + cols - 1) / cols;
+        (rows, cols)
+    }
+}
+
+/// Compute the Rect for a given pane index within a grid layout.
+fn grid_rect(pane_area: Rect, index: usize, total: usize) -> Rect {
+    let (rows, cols) = grid_dims(total);
+    let col = index % cols;
+    let row = index / cols;
+    let cell_w = pane_area.width / cols as u16;
+    let cell_h = pane_area.height / rows as u16;
+
+    // Last column gets remaining width, last row gets remaining height
+    let x = pane_area.x + col as u16 * cell_w;
+    let y = pane_area.y + row as u16 * cell_h;
+    let w = if col == cols - 1 {
+        pane_area.width - col as u16 * cell_w
+    } else {
+        cell_w
+    };
+    let h = if row == rows - 1 {
+        pane_area.height - row as u16 * cell_h
+    } else {
+        cell_h
+    };
+    Rect::new(x, y, w, h)
 }
 
 /// Estimate the inner area for initial PTY size (before first draw).
 fn estimate_inner(total_rows: u16, total_cols: u16, nr_panes: u16) -> (u16, u16) {
-    let pane_rows = total_rows.saturating_sub(1) / std::cmp::max(nr_panes, 1);
+    let (grid_rows, grid_cols) = grid_dims(nr_panes as usize);
+    let pane_rows = total_rows.saturating_sub(1) / std::cmp::max(grid_rows as u16, 1);
+    let pane_cols = total_cols / std::cmp::max(grid_cols as u16, 1);
     let inner_rows = pane_rows.saturating_sub(2);
-    let inner_cols = total_cols.saturating_sub(2);
+    let inner_cols = pane_cols.saturating_sub(2);
     (std::cmp::max(inner_rows, 1), std::cmp::max(inner_cols, 1))
 }
 
@@ -406,13 +438,8 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
                 .style(Style::default().fg(Color::Yellow));
                 frame.render_widget(msg, pane_area);
             } else {
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints(pane_constraints(panes.len()))
-                    .split(pane_area);
-
                 for (index, pane) in panes.iter().enumerate() {
-                    let chunk = chunks[index];
+                    let chunk = grid_rect(pane_area, index, panes.len());
 
                     let title = match &pane.feature_id {
                         Some(fid) => format!(" {} — {} ", pane.agent_id, fid),
