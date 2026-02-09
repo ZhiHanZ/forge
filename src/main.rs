@@ -42,6 +42,12 @@ enum Commands {
         /// Show TUI dashboard
         #[arg(long)]
         watch: bool,
+        /// Override backend for all roles (e.g. claude, codex)
+        #[arg(long)]
+        backend: Option<String>,
+        /// Override model for all roles (e.g. sonnet, o3)
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Run all verify scripts
     Verify,
@@ -72,7 +78,9 @@ fn main() {
             agents,
             max_sessions,
             watch: _,
-        } => cmd_run(&cli.project, agents, max_sessions),
+            backend,
+            model,
+        } => cmd_run(&cli.project, agents, max_sessions, backend, model),
         Commands::Verify => cmd_verify(&cli.project),
         Commands::Status => cmd_status(&cli.project),
         Commands::Stop => cmd_stop(&cli.project),
@@ -94,6 +102,7 @@ fn cmd_init(project_dir: &PathBuf, description: &str) {
             println!("  feedback/               test summaries");
             println!("  scripts/verify/         verify scripts");
             println!("  .claude/skills/         4 skills installed");
+            println!("  .agents/skills/         4 skills installed (Codex)");
             println!();
             println!("Next steps:");
             println!("  1. Write DESIGN.md with your project design");
@@ -114,6 +123,7 @@ fn cmd_install(project_dir: &PathBuf) {
             println!();
             println!("Updated:");
             println!("  .claude/skills/         skills reinstalled from binary");
+            println!("  .agents/skills/         skills reinstalled from binary (Codex)");
             println!("  CLAUDE.md               regenerated from forge.toml");
             println!("  AGENTS.md               regenerated from forge.toml");
             println!("  context/                directories ensured");
@@ -159,14 +169,36 @@ fn cmd_install(project_dir: &PathBuf) {
     }
 }
 
-fn cmd_run(project_dir: &PathBuf, agents: usize, max_sessions: usize) {
+fn cmd_run(
+    project_dir: &PathBuf,
+    agents: usize,
+    max_sessions: usize,
+    backend: Option<String>,
+    model: Option<String>,
+) {
+    // Sync skills to both .claude/skills/ and .agents/skills/ so existing
+    // projects work with Codex without requiring re-init.
+    if let Err(e) = skills::sync_skills(project_dir) {
+        eprintln!("Warning: failed to sync skills: {e}");
+    }
+
     // Load forge config to get role settings
     let forge_config = config::ForgeConfig::load(project_dir).unwrap_or_else(|_| {
         config::ForgeConfig::scaffold("unknown", "")
     });
 
-    let protocol = forge_config.forge.roles.protocol.clone();
-    let orchestrating = forge_config.forge.roles.orchestrating.clone();
+    let mut protocol = forge_config.forge.roles.protocol.clone();
+    let mut orchestrating = forge_config.forge.roles.orchestrating.clone();
+
+    // Apply CLI overrides
+    if let Some(ref b) = backend {
+        protocol.backend = b.clone();
+        orchestrating.backend = b.clone();
+    }
+    if let Some(ref m) = model {
+        protocol.model = m.clone();
+        orchestrating.model = m.clone();
+    }
 
     println!(
         "forge run: {} agent(s), backend={}, model={}, max_sessions={}",

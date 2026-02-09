@@ -1,6 +1,25 @@
-/// Embedded skill files. Written to .claude/skills/ by forge init.
+/// Embedded skill files. Written to .claude/skills/ and .agents/skills/ by forge init.
 ///
 /// Each skill is a (relative_path, content) pair.
+
+use std::path::Path;
+
+/// Sync all skills to both .claude/skills/ and .agents/skills/.
+/// Called at the start of forge run to ensure existing projects have
+/// Codex-compatible skills without requiring re-init.
+pub fn sync_skills(project_dir: &Path) -> Result<(), std::io::Error> {
+    let dirs = [".claude/skills", ".agents/skills"];
+    for (skill_name, files) in all_skills() {
+        for base in &dirs {
+            let skill_dir = project_dir.join(base).join(skill_name);
+            std::fs::create_dir_all(&skill_dir)?;
+            for (filename, content) in &files {
+                std::fs::write(skill_dir.join(filename), content)?;
+            }
+        }
+    }
+    Ok(())
+}
 
 pub fn forge_planning_files() -> Vec<(&'static str, &'static str)> {
     vec![
@@ -122,5 +141,30 @@ mod tests {
         assert!(files.iter().any(|(p, _)| *p == "CONTEXT-WRITING.md"));
         assert!(files.iter().any(|(p, _)| *p == "CONTEXT-READING.md"));
         assert!(files.iter().any(|(p, _)| *p == "TESTING.md"));
+    }
+
+    #[test]
+    fn sync_skills_populates_both_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        sync_skills(dir.path()).unwrap();
+
+        for base in &[".claude/skills", ".agents/skills"] {
+            for (skill_name, files) in all_skills() {
+                for (filename, _) in &files {
+                    let path = dir.path().join(base).join(skill_name).join(filename);
+                    assert!(path.exists(), "missing: {}", path.display());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sync_skills_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        sync_skills(dir.path()).unwrap();
+        sync_skills(dir.path()).unwrap(); // second call should not fail
+
+        let path = dir.path().join(".agents/skills/forge-protocol/SKILL.md");
+        assert!(path.exists());
     }
 }

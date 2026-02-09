@@ -104,13 +104,16 @@ pub fn install_project(project_dir: &Path) -> Result<(), InitError> {
     Ok(())
 }
 
-/// Install all forge skills into .claude/skills/.
+/// Install all forge skills into .claude/skills/ and .agents/skills/.
 pub fn install_skills(project_dir: &Path) -> Result<(), std::io::Error> {
+    let dirs = [".claude/skills", ".agents/skills"];
     for (skill_name, files) in skills::all_skills() {
-        let skill_dir = project_dir.join(".claude/skills").join(skill_name);
-        std::fs::create_dir_all(&skill_dir)?;
-        for (filename, content) in files {
-            std::fs::write(skill_dir.join(filename), content)?;
+        for base in &dirs {
+            let skill_dir = project_dir.join(base).join(skill_name);
+            std::fs::create_dir_all(&skill_dir)?;
+            for &(filename, content) in &files {
+                std::fs::write(skill_dir.join(filename), content)?;
+            }
         }
     }
     Ok(())
@@ -191,50 +194,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_project(dir.path(), "test").unwrap();
 
-        // All 4 skills installed
-        assert!(dir
-            .path()
-            .join(".claude/skills/forge-planning/SKILL.md")
-            .exists());
-        assert!(dir
-            .path()
-            .join(".claude/skills/forge-planning/COVERAGE.md")
-            .exists());
-        assert!(dir
-            .path()
-            .join(".claude/skills/forge-protocol/SKILL.md")
-            .exists());
-        assert!(dir
-            .path()
-            .join(".claude/skills/forge-protocol/CLAIMING.md")
-            .exists());
-        assert!(dir
-            .path()
-            .join(".claude/skills/forge-protocol/CONTEXT-WRITING.md")
-            .exists());
-        assert!(dir
-            .path()
-            .join(".claude/skills/forge-protocol/CONTEXT-READING.md")
-            .exists());
-        assert!(dir
-            .path()
-            .join(".claude/skills/forge-protocol/TESTING.md")
-            .exists());
-        assert!(dir
-            .path()
-            .join(".claude/skills/forge-orchestrating/SKILL.md")
-            .exists());
-        assert!(dir
-            .path()
-            .join(".claude/skills/forge-adjusting/SKILL.md")
-            .exists());
+        // Skills installed to both .claude/skills/ and .agents/skills/
+        for base in &[".claude/skills", ".agents/skills"] {
+            assert!(dir.path().join(base).join("forge-planning/SKILL.md").exists());
+            assert!(dir.path().join(base).join("forge-planning/COVERAGE.md").exists());
+            assert!(dir.path().join(base).join("forge-protocol/SKILL.md").exists());
+            assert!(dir.path().join(base).join("forge-protocol/CLAIMING.md").exists());
+            assert!(dir.path().join(base).join("forge-protocol/CONTEXT-WRITING.md").exists());
+            assert!(dir.path().join(base).join("forge-protocol/CONTEXT-READING.md").exists());
+            assert!(dir.path().join(base).join("forge-protocol/TESTING.md").exists());
+            assert!(dir.path().join(base).join("forge-orchestrating/SKILL.md").exists());
+            assert!(dir.path().join(base).join("forge-adjusting/SKILL.md").exists());
+        }
 
-        // Skill files have content
-        let planning = std::fs::read_to_string(
-            dir.path().join(".claude/skills/forge-planning/SKILL.md"),
-        )
-        .unwrap();
-        assert!(planning.contains("forge-planning"));
+        // Skill files have content (check both paths)
+        for base in &[".claude/skills", ".agents/skills"] {
+            let planning = std::fs::read_to_string(
+                dir.path().join(base).join("forge-planning/SKILL.md"),
+            )
+            .unwrap();
+            assert!(planning.contains("forge-planning"));
+        }
     }
 
     #[test]
@@ -269,16 +249,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_project(dir.path(), "test").unwrap();
 
-        // Delete skills
-        std::fs::remove_dir_all(dir.path().join(".claude/skills")).unwrap();
+        // Delete skills from both paths
+        let _ = std::fs::remove_dir_all(dir.path().join(".claude/skills"));
+        let _ = std::fs::remove_dir_all(dir.path().join(".agents/skills"));
         assert!(!dir.path().join(".claude/skills/forge-planning/SKILL.md").exists());
+        assert!(!dir.path().join(".agents/skills/forge-planning/SKILL.md").exists());
 
-        // Install restores them
+        // Install restores them in both locations
         install_project(dir.path()).unwrap();
-        assert!(dir.path().join(".claude/skills/forge-planning/SKILL.md").exists());
-        assert!(dir.path().join(".claude/skills/forge-protocol/SKILL.md").exists());
-        assert!(dir.path().join(".claude/skills/forge-orchestrating/SKILL.md").exists());
-        assert!(dir.path().join(".claude/skills/forge-adjusting/SKILL.md").exists());
+        for base in &[".claude/skills", ".agents/skills"] {
+            assert!(dir.path().join(base).join("forge-planning/SKILL.md").exists());
+            assert!(dir.path().join(base).join("forge-protocol/SKILL.md").exists());
+            assert!(dir.path().join(base).join("forge-orchestrating/SKILL.md").exists());
+            assert!(dir.path().join(base).join("forge-adjusting/SKILL.md").exists());
+        }
     }
 
     #[test]
