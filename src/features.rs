@@ -1,0 +1,403 @@
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeatureList {
+    pub features: Vec<Feature>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Feature {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub feature_type: FeatureType,
+    pub scope: String,
+    pub description: String,
+    pub verify: String,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default = "default_priority")]
+    pub priority: u32,
+    #[serde(default)]
+    pub status: FeatureStatus,
+    pub claimed_by: Option<String>,
+    pub blocked_reason: Option<String>,
+}
+
+fn default_priority() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FeatureType {
+    Implement,
+    Review,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FeatureStatus {
+    #[default]
+    Pending,
+    Claimed,
+    Done,
+    Blocked,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FeatureError {
+    #[error("failed to read features.json: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("failed to parse features.json: {0}")]
+    Parse(#[from] serde_json::Error),
+    #[error("feature not found: {0}")]
+    NotFound(String),
+    #[error("feature {0} already claimed by {1}")]
+    AlreadyClaimed(String, String),
+    #[error("feature {0} has unmet dependencies: {1:?}")]
+    DepsNotMet(String, Vec<String>),
+}
+
+impl FeatureList {
+    pub fn load(project_dir: &Path) -> Result<Self, FeatureError> {
+        let path = project_dir.join("features.json");
+        let content = std::fs::read_to_string(&path)?;
+        let list: FeatureList = serde_json::from_str(&content)?;
+        Ok(list)
+    }
+
+    pub fn save(&self, project_dir: &Path) -> Result<(), FeatureError> {
+        let path = project_dir.join("features.json");
+        let content = serde_json::to_string_pretty(self)?;
+        std::fs::write(&path, content)?;
+        Ok(())
+    }
+
+    /// Find the highest-priority pending feature whose deps are all done.
+    pub fn next_claimable(&self) -> Option<&Feature> {
+        let done_ids: Vec<&str> = self
+            .features
+            .iter()
+            .filter(|f| f.status == FeatureStatus::Done)
+            .map(|f| f.id.as_str())
+            .collect();
+
+        self.features
+            .iter()
+            .filter(|f| f.status == FeatureStatus::Pending)
+            .filter(|f| f.depends_on.iter().all(|dep| done_ids.contains(&dep.as_str())))
+            .min_by_key(|f| f.priority)
+    }
+
+    /// Find up to N highest-priority pending features whose deps are all done.
+    pub fn next_n_claimable(&self, n: usize) -> Vec<&Feature> {
+        let done_ids: Vec<&str> = self
+            .features
+            .iter()
+            .filter(|f| f.status == FeatureStatus::Done)
+            .map(|f| f.id.as_str())
+            .collect();
+
+        let mut claimable: Vec<&Feature> = self
+            .features
+            .iter()
+            .filter(|f| f.status == FeatureStatus::Pending)
+            .filter(|f| f.depends_on.iter().all(|dep| done_ids.contains(&dep.as_str())))
+            .collect();
+
+        claimable.sort_by_key(|f| f.priority);
+        claimable.truncate(n);
+        claimable
+    }
+
+    /// Claim a feature for an agent. Returns error if already claimed or deps not met.
+    pub fn claim(&mut self, feature_id: &str, agent_id: &str) -> Result<(), FeatureError> {
+        let done_ids: Vec<String> = self
+            .features
+            .iter()
+            .filter(|f| f.status == FeatureStatus::Done)
+            .map(|f| f.id.clone())
+            .collect();
+
+        let feature = self
+            .features
+            .iter_mut()
+            .find(|f| f.id == feature_id)
+            .ok_or_else(|| FeatureError::NotFound(feature_id.into()))?;
+
+        if let Some(claimed_by) = &feature.claimed_by {
+            return Err(FeatureError::AlreadyClaimed(
+                feature_id.into(),
+                claimed_by.clone(),
+            ));
+        }
+
+        let unmet: Vec<String> = feature
+            .depends_on
+            .iter()
+            .filter(|dep| !done_ids.contains(dep))
+            .cloned()
+            .collect();
+
+        if !unmet.is_empty() {
+            return Err(FeatureError::DepsNotMet(feature_id.into(), unmet));
+        }
+
+        feature.status = FeatureStatus::Claimed;
+        feature.claimed_by = Some(agent_id.into());
+        Ok(())
+    }
+
+    /// Mark a feature as done.
+    pub fn mark_done(&mut self, feature_id: &str) -> Result<(), FeatureError> {
+        let feature = self
+            .features
+            .iter_mut()
+            .find(|f| f.id == feature_id)
+            .ok_or_else(|| FeatureError::NotFound(feature_id.into()))?;
+        feature.status = FeatureStatus::Done;
+        Ok(())
+    }
+
+    /// Mark a feature as blocked with a reason.
+    pub fn mark_blocked(
+        &mut self,
+        feature_id: &str,
+        reason: &str,
+    ) -> Result<(), FeatureError> {
+        let feature = self
+            .features
+            .iter_mut()
+            .find(|f| f.id == feature_id)
+            .ok_or_else(|| FeatureError::NotFound(feature_id.into()))?;
+        feature.status = FeatureStatus::Blocked;
+        feature.blocked_reason = Some(reason.into());
+        Ok(())
+    }
+
+    /// Reopen a feature (verify failed after agent said done).
+    pub fn reopen(&mut self, feature_id: &str) -> Result<(), FeatureError> {
+        let feature = self
+            .features
+            .iter_mut()
+            .find(|f| f.id == feature_id)
+            .ok_or_else(|| FeatureError::NotFound(feature_id.into()))?;
+        feature.status = FeatureStatus::Pending;
+        feature.claimed_by = None;
+        feature.blocked_reason = None;
+        Ok(())
+    }
+
+    /// Summary counts by status.
+    pub fn status_counts(&self) -> StatusCounts {
+        let mut counts = StatusCounts::default();
+        for f in &self.features {
+            match f.status {
+                FeatureStatus::Pending => counts.pending += 1,
+                FeatureStatus::Claimed => counts.claimed += 1,
+                FeatureStatus::Done => counts.done += 1,
+                FeatureStatus::Blocked => counts.blocked += 1,
+            }
+        }
+        counts.total = self.features.len();
+        counts
+    }
+
+    /// Check if all features are done.
+    pub fn all_done(&self) -> bool {
+        self.features.iter().all(|f| f.status == FeatureStatus::Done)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct StatusCounts {
+    pub total: usize,
+    pub pending: usize,
+    pub claimed: usize,
+    pub done: usize,
+    pub blocked: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_features() -> FeatureList {
+        FeatureList {
+            features: vec![
+                Feature {
+                    id: "f001".into(),
+                    feature_type: FeatureType::Implement,
+                    scope: "data-model".into(),
+                    description: "Create User struct".into(),
+                    verify: "./scripts/verify/f001.sh".into(),
+                    depends_on: vec![],
+                    priority: 1,
+                    status: FeatureStatus::Pending,
+                    claimed_by: None,
+                    blocked_reason: None,
+                },
+                Feature {
+                    id: "f002".into(),
+                    feature_type: FeatureType::Implement,
+                    scope: "auth".into(),
+                    description: "Add login endpoint".into(),
+                    verify: "./scripts/verify/f002.sh".into(),
+                    depends_on: vec!["f001".into()],
+                    priority: 2,
+                    status: FeatureStatus::Pending,
+                    claimed_by: None,
+                    blocked_reason: None,
+                },
+                Feature {
+                    id: "f003".into(),
+                    feature_type: FeatureType::Review,
+                    scope: "data-model".into(),
+                    description: "Review data-model boundaries".into(),
+                    verify: "./scripts/verify/review-dm.sh".into(),
+                    depends_on: vec!["f001".into()],
+                    priority: 3,
+                    status: FeatureStatus::Pending,
+                    claimed_by: None,
+                    blocked_reason: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn next_claimable_respects_deps() {
+        let list = sample_features();
+        let next = list.next_claimable().unwrap();
+        // f001 has no deps, should be claimable. f002/f003 depend on f001.
+        assert_eq!(next.id, "f001");
+    }
+
+    #[test]
+    fn next_claimable_after_dep_done() {
+        let mut list = sample_features();
+        list.claim("f001", "agent-1").unwrap();
+        list.mark_done("f001").unwrap();
+
+        let next = list.next_claimable().unwrap();
+        // f002 (priority 2) should be claimable now
+        assert_eq!(next.id, "f002");
+    }
+
+    #[test]
+    fn claim_prevents_double_claim() {
+        let mut list = sample_features();
+        list.claim("f001", "agent-1").unwrap();
+        let result = list.claim("f001", "agent-2");
+        assert!(matches!(result, Err(FeatureError::AlreadyClaimed(_, _))));
+    }
+
+    #[test]
+    fn claim_checks_deps() {
+        let mut list = sample_features();
+        let result = list.claim("f002", "agent-1");
+        assert!(matches!(result, Err(FeatureError::DepsNotMet(_, _))));
+    }
+
+    #[test]
+    fn mark_blocked_sets_reason() {
+        let mut list = sample_features();
+        list.claim("f001", "agent-1").unwrap();
+        list.mark_blocked("f001", "stuck on compile error").unwrap();
+
+        let f = list.features.iter().find(|f| f.id == "f001").unwrap();
+        assert_eq!(f.status, FeatureStatus::Blocked);
+        assert_eq!(f.blocked_reason.as_deref(), Some("stuck on compile error"));
+    }
+
+    #[test]
+    fn reopen_resets_status() {
+        let mut list = sample_features();
+        list.claim("f001", "agent-1").unwrap();
+        list.mark_done("f001").unwrap();
+        list.reopen("f001").unwrap();
+
+        let f = list.features.iter().find(|f| f.id == "f001").unwrap();
+        assert_eq!(f.status, FeatureStatus::Pending);
+        assert!(f.claimed_by.is_none());
+    }
+
+    #[test]
+    fn status_counts() {
+        let mut list = sample_features();
+        list.claim("f001", "agent-1").unwrap();
+        list.mark_done("f001").unwrap();
+
+        let counts = list.status_counts();
+        assert_eq!(counts.total, 3);
+        assert_eq!(counts.done, 1);
+        assert_eq!(counts.pending, 2);
+    }
+
+    #[test]
+    fn all_done_false_when_pending() {
+        let list = sample_features();
+        assert!(!list.all_done());
+    }
+
+    #[test]
+    fn all_done_true_when_complete() {
+        let mut list = sample_features();
+        for id in ["f001", "f002", "f003"] {
+            list.claim(id, "agent-1").ok();
+            list.mark_done(id).unwrap();
+        }
+        assert!(list.all_done());
+    }
+
+    #[test]
+    fn roundtrip_save_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let list = sample_features();
+        list.save(dir.path()).unwrap();
+        let loaded = FeatureList::load(dir.path()).unwrap();
+        assert_eq!(list, loaded);
+    }
+
+    #[test]
+    fn json_serialization_format() {
+        let list = sample_features();
+        let json = serde_json::to_string_pretty(&list).unwrap();
+        assert!(json.contains("\"type\": \"implement\""));
+        assert!(json.contains("\"status\": \"pending\""));
+        assert!(json.contains("\"depends_on\""));
+    }
+
+    #[test]
+    fn next_n_claimable_returns_up_to_n() {
+        let mut list = sample_features();
+        // Make f001 done so f002 and f003 become claimable
+        list.claim("f001", "agent-1").unwrap();
+        list.mark_done("f001").unwrap();
+
+        let claimable = list.next_n_claimable(5);
+        // f002 (priority 2) and f003 (priority 3) should be claimable
+        assert_eq!(claimable.len(), 2);
+        assert_eq!(claimable[0].id, "f002");
+        assert_eq!(claimable[1].id, "f003");
+    }
+
+    #[test]
+    fn next_n_claimable_respects_limit() {
+        let mut list = sample_features();
+        list.claim("f001", "agent-1").unwrap();
+        list.mark_done("f001").unwrap();
+
+        let claimable = list.next_n_claimable(1);
+        assert_eq!(claimable.len(), 1);
+        assert_eq!(claimable[0].id, "f002"); // highest priority
+    }
+
+    #[test]
+    fn not_found_error() {
+        let mut list = sample_features();
+        let result = list.claim("f999", "agent-1");
+        assert!(matches!(result, Err(FeatureError::NotFound(_))));
+    }
+}

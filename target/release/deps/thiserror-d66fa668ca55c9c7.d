@@ -1,0 +1,14 @@
+/Users/zhhanz/Documents/rust/src/claude-supermemory/forge/target/release/deps/thiserror-d66fa668ca55c9c7.d: /Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /Users/zhhanz/Documents/rust/src/claude-supermemory/forge/target/release/build/thiserror-881c671c66519844/out/private.rs
+
+/Users/zhhanz/Documents/rust/src/claude-supermemory/forge/target/release/deps/libthiserror-d66fa668ca55c9c7.rlib: /Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /Users/zhhanz/Documents/rust/src/claude-supermemory/forge/target/release/build/thiserror-881c671c66519844/out/private.rs
+
+/Users/zhhanz/Documents/rust/src/claude-supermemory/forge/target/release/deps/libthiserror-d66fa668ca55c9c7.rmeta: /Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /Users/zhhanz/Documents/rust/src/claude-supermemory/forge/target/release/build/thiserror-881c671c66519844/out/private.rs
+
+/Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs:
+/Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs:
+/Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs:
+/Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs:
+/Users/zhhanz/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs:
+/Users/zhhanz/Documents/rust/src/claude-supermemory/forge/target/release/build/thiserror-881c671c66519844/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/zhhanz/Documents/rust/src/claude-supermemory/forge/target/release/build/thiserror-881c671c66519844/out
