@@ -569,7 +569,38 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
             status_counts = load_status_counts(&project_dir);
         }
 
-        cleanup_exited_panes(&mut panes, &mut active_pane);
+        // Replace exited panes with next available features
+        let mut i = 0;
+        while i < panes.len() {
+            if !panes[i].is_alive() {
+                panes.remove(i);
+                // Try to spawn a replacement with the next claimable feature
+                let ts = terminal.size()?;
+                let nr = panes.len() as u16 + 1;
+                let (r, c) = estimate_inner(ts.height, ts.width, nr);
+                if open_next_feature_pane(&mut panes, &mut active_pane, r, c, config).is_none() {
+                    // No more features — adjust active pane index
+                    if panes.is_empty() {
+                        active_pane = None;
+                    } else if let Some(active) = active_pane {
+                        if active >= panes.len() {
+                            active_pane = Some(panes.len() - 1);
+                        }
+                    }
+                }
+                // Don't increment i — the replacement (or shifted element) is at the same index
+            } else {
+                i += 1;
+            }
+        }
+
+        // If all panes are gone and no features left, exit
+        if panes.is_empty() {
+            status_counts = load_status_counts(&project_dir);
+            if status_counts.pending == 0 && status_counts.claimed == 0 {
+                break;
+            }
+        }
     }
 
     ratatui::restore();
