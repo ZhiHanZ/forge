@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "forge", about = "Orchestrate autonomous coding agents")]
+#[command(name = "forge", about = "Orchestrate autonomous coding agents", version)]
 struct Cli {
     /// Project directory (default: current directory)
     #[arg(short, long, default_value = ".")]
