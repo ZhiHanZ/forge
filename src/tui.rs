@@ -64,14 +64,16 @@ impl PtyPane {
             });
         }
 
-        // Read PTY output and feed it to vt100::Parser
+        // Read PTY output and feed it to vt100::Parser.
+        // Uses spawn_blocking because reader.read() is synchronous and would
+        // starve the tokio async worker threads if run via tokio::spawn.
         {
             let mut reader = pty_pair
                 .master
                 .try_clone_reader()
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
             let parser = parser.clone();
-            tokio::spawn(async move {
+            spawn_blocking(move || {
                 let mut buf = [0u8; 8192];
                 loop {
                     match reader.read(&mut buf) {
