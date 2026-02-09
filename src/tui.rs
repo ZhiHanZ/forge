@@ -304,7 +304,7 @@ fn render_status_bar(counts: &StatusCounts, area: Rect, frame: &mut ratatui::Fra
         counts.done, counts.total, counts.pending, counts.claimed, counts.blocked,
     );
 
-    let help_text = " Ctrl+J/K: switch | Ctrl+N: new | Ctrl+X: close | Ctrl+Q: quit ";
+    let help_text = " Alt+J/K: switch | Ctrl+N: new | Ctrl+X: close | Ctrl+Q: quit ";
 
     let bar = Line::from(vec![
         Span::styled(
@@ -450,14 +450,14 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
                             resize_all_panes(&mut panes, pane_size);
                         }
                     }
-                    // Ctrl+K: previous pane
-                    KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Alt+K: previous pane
+                    KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::ALT) => {
                         if let Some(idx) = active_pane {
                             active_pane = Some(idx.saturating_sub(1));
                         }
                     }
-                    // Ctrl+J: next pane
-                    KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Alt+J: next pane
+                    KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::ALT) => {
                         if let Some(idx) = active_pane {
                             if idx < panes.len().saturating_sub(1) {
                                 active_pane = Some(idx + 1);
