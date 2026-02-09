@@ -46,7 +46,7 @@ impl PtyPane {
             })
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
-        let parser = Arc::new(RwLock::new(vt100::Parser::new(rows, cols, 0)));
+        let parser = Arc::new(RwLock::new(vt100::Parser::new(rows, cols, 10000)));
         let exited = Arc::new(AtomicBool::new(false));
 
         // Spawn the child process on the slave side of the PTY
