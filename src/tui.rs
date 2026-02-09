@@ -223,7 +223,7 @@ async fn handle_pane_key_event(pane: &mut PtyPane, key: &KeyEvent) -> bool {
             }
             send
         }
-        KeyCode::Enter => vec![b'\n'],
+        KeyCode::Enter => vec![b'\r'],
         KeyCode::Backspace => vec![8],
         KeyCode::Left => vec![27, 91, 68],
         KeyCode::Right => vec![27, 91, 67],
