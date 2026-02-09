@@ -311,7 +311,7 @@ fn render_status_bar(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                " j/k:switch  n:new  x:close  q:quit  esc:cancel ",
+                " 1-9:goto  j/k:switch  n:new  x:close  q:quit  esc:cancel ",
                 Style::default()
                     .fg(Color::Yellow)
                     .bg(Color::DarkGray),
@@ -441,9 +441,10 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
                 for (index, pane) in panes.iter().enumerate() {
                     let chunk = grid_rect(pane_area, index, panes.len());
 
+                    let pane_num = index + 1;
                     let title = match &pane.feature_id {
-                        Some(fid) => format!(" {} — {} ", pane.agent_id, fid),
-                        None => format!(" {} ", pane.agent_id),
+                        Some(fid) => format!(" [{}] {} — {} ", pane_num, pane.agent_id, fid),
+                        None => format!(" [{}] {} ", pane_num, pane.agent_id),
                     };
 
                     let is_active = Some(index) == active_pane;
@@ -488,6 +489,13 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
                         // Command mode: interpret next key as a command, then return to normal
                         command_mode = false;
                         match key.code {
+                            // 1-9: jump to pane by number
+                            KeyCode::Char(c @ '1'..='9') => {
+                                let target = (c as usize) - ('1' as usize);
+                                if target < panes.len() {
+                                    active_pane = Some(target);
+                                }
+                            }
                             // j or Down: next pane
                             KeyCode::Char('j') | KeyCode::Down => {
                                 if let Some(idx) = active_pane {
