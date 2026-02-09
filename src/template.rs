@@ -40,10 +40,12 @@ pub fn generate_claude_md(config: &ForgeConfig) -> String {
     lines.push(String::new());
 
     lines.push("### State (read first every session)".into());
+    lines.push("- `context/INDEX.md` — scan one-liners to find relevant context.".into());
     lines.push("- `features.json` — task list. Find your work here.".into());
     lines.push("- `context/decisions/` — why choices were made.".into());
     lines.push("- `context/gotchas/` — known pitfalls.".into());
     lines.push("- `context/patterns/` — code conventions.".into());
+    lines.push("- `context/poc/` — POC outcomes (goal, result, learnings, design impact).".into());
     lines.push("- `context/references/` — external knowledge, read instead of re-searching.".into());
     lines.push("- `feedback/session-review.md` — last session's review (read first!).".into());
     lines.push(String::new());
@@ -97,6 +99,13 @@ mod tests {
         assert!(md.contains("### Protocol"));
         assert!(md.contains("Read features.json"));
         assert!(md.contains("context/references/"));
+    }
+
+    #[test]
+    fn claude_md_has_poc_context() {
+        let config = ForgeConfig::scaffold("test", "Rust");
+        let md = generate_claude_md(&config);
+        assert!(md.contains("context/poc/"));
     }
 
     #[test]

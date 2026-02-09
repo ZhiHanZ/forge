@@ -49,6 +49,10 @@ pub fn init_project(project_dir: &Path, description: &str) -> Result<(), InitErr
     };
     features.save(project_dir)?;
 
+    // Create references/ dir and add to .gitignore
+    std::fs::create_dir_all(project_dir.join("references"))?;
+    append_gitignore(project_dir, "references/")?;
+
     // Install skills
     install_skills(project_dir)?;
 
@@ -73,6 +77,11 @@ pub fn install_project(project_dir: &Path) -> Result<(), InitError> {
     std::fs::create_dir_all(project_dir.join("feedback"))?;
     std::fs::create_dir_all(project_dir.join("scripts/verify"))?;
     std::fs::create_dir_all(project_dir.join(".forge"))?;
+    std::fs::create_dir_all(project_dir.join("references"))?;
+    append_gitignore(project_dir, "references/")?;
+
+    // Regenerate context INDEX.md
+    ctx.write_index()?;
 
     // chmod +x on verify scripts
     #[cfg(unix)]
@@ -104,6 +113,25 @@ pub fn install_skills(project_dir: &Path) -> Result<(), std::io::Error> {
             std::fs::write(skill_dir.join(filename), content)?;
         }
     }
+    Ok(())
+}
+
+/// Append an entry to .gitignore if not already present.
+fn append_gitignore(project_dir: &Path, entry: &str) -> Result<(), std::io::Error> {
+    let gitignore = project_dir.join(".gitignore");
+    let existing = std::fs::read_to_string(&gitignore).unwrap_or_default();
+    if existing.lines().any(|line| line.trim() == entry) {
+        return Ok(());
+    }
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&gitignore)?;
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        writeln!(file)?;
+    }
+    writeln!(file, "{entry}")?;
     Ok(())
 }
 
@@ -150,6 +178,7 @@ mod tests {
         assert!(dir.path().join("context/decisions").is_dir());
         assert!(dir.path().join("context/gotchas").is_dir());
         assert!(dir.path().join("context/patterns").is_dir());
+        assert!(dir.path().join("context/poc").is_dir());
         assert!(dir.path().join("context/references").is_dir());
 
         // feedback and scripts
@@ -182,6 +211,14 @@ mod tests {
         assert!(dir
             .path()
             .join(".claude/skills/forge-protocol/CONTEXT-WRITING.md")
+            .exists());
+        assert!(dir
+            .path()
+            .join(".claude/skills/forge-protocol/CONTEXT-READING.md")
+            .exists());
+        assert!(dir
+            .path()
+            .join(".claude/skills/forge-protocol/TESTING.md")
             .exists());
         assert!(dir
             .path()
@@ -280,6 +317,43 @@ mod tests {
         install_project(dir.path()).unwrap();
         let mode = std::fs::metadata(&script).unwrap().permissions().mode();
         assert!(mode & 0o111 != 0, "script should be executable after install");
+    }
+
+    #[test]
+    fn init_creates_references_dir_and_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        init_project(dir.path(), "test").unwrap();
+
+        assert!(dir.path().join("references").is_dir());
+        let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(gitignore.contains("references/"));
+    }
+
+    #[test]
+    fn install_creates_references_and_index() {
+        let dir = tempfile::tempdir().unwrap();
+        init_project(dir.path(), "test").unwrap();
+
+        // Add a context entry, then install to regenerate index
+        let ctx = ContextManager::new(dir.path());
+        ctx.write_entry("decisions", "use-vec", "# Use Vec<u8>\nSimpler.").unwrap();
+        install_project(dir.path()).unwrap();
+
+        // INDEX.md should exist with the entry
+        let index = std::fs::read_to_string(dir.path().join("context/INDEX.md")).unwrap();
+        assert!(index.contains("use-vec"));
+    }
+
+    #[test]
+    fn gitignore_not_duplicated() {
+        let dir = tempfile::tempdir().unwrap();
+        init_project(dir.path(), "test").unwrap();
+        // Install again — should not duplicate
+        install_project(dir.path()).unwrap();
+
+        let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        let count = gitignore.matches("references/").count();
+        assert_eq!(count, 1, "references/ should appear exactly once in .gitignore");
     }
 
     #[test]

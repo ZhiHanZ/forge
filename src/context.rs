@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// The four context categories.
-const CATEGORIES: &[&str] = &["decisions", "gotchas", "patterns", "references"];
+/// The five context categories.
+const CATEGORIES: &[&str] = &["decisions", "gotchas", "patterns", "poc", "references"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum ContextError {
@@ -137,6 +137,78 @@ impl ContextManager {
         Ok(section)
     }
 
+    /// Generate context/INDEX.md — one-line-per-entry table of contents.
+    /// Agents scan this (~1 token/entry) to decide what to read in full.
+    pub fn generate_index(&self) -> Result<String, ContextError> {
+        let mut index = String::from("# Context Index\n\n");
+        let mut total = 0usize;
+
+        for cat in CATEGORIES {
+            let entries = self.list_category(cat)?;
+            if entries.is_empty() {
+                continue;
+            }
+            let label = capitalize(cat);
+            index.push_str(&format!("## {label} ({} entries)\n", entries.len()));
+            for entry in &entries {
+                let summary = self.first_heading(&entry.path);
+                index.push_str(&format!("- {}: {}\n", entry.slug, summary));
+            }
+            index.push('\n');
+            total += entries.len();
+        }
+
+        if total == 0 {
+            return Ok(String::new());
+        }
+
+        Ok(index)
+    }
+
+    /// Write INDEX.md to context/.
+    pub fn write_index(&self) -> Result<(), ContextError> {
+        let index = self.generate_index()?;
+        if index.is_empty() {
+            return Ok(());
+        }
+        std::fs::write(self.root.join("INDEX.md"), &index)?;
+        Ok(())
+    }
+
+    /// Extract first heading or first non-empty line from a file.
+    fn first_heading(&self, path: &Path) -> String {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return "(unreadable)".into(),
+        };
+        // Skip YAML frontmatter
+        let body = if content.starts_with("---") {
+            content
+                .splitn(3, "---")
+                .nth(2)
+                .unwrap_or(&content)
+        } else {
+            &content
+        };
+        for line in body.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // Strip markdown heading prefix
+            let stripped = trimmed.trim_start_matches('#').trim();
+            if !stripped.is_empty() {
+                // Truncate to 80 chars
+                return if stripped.len() > 80 {
+                    format!("{}...", &stripped[..77])
+                } else {
+                    stripped.to_string()
+                };
+            }
+        }
+        "(empty)".into()
+    }
+
     /// Write a reference entry with YAML frontmatter.
     pub fn write_reference(
         &self,
@@ -235,6 +307,7 @@ mod tests {
         assert_eq!(counts["decisions"], 2);
         assert_eq!(counts["gotchas"], 1);
         assert_eq!(counts["patterns"], 0);
+        assert_eq!(counts["poc"], 0);
         assert_eq!(counts["references"], 0);
     }
 
@@ -291,6 +364,62 @@ mod tests {
         mgr.write_entry("decisions", "d1", "version 2").unwrap();
         let content = mgr.read_entry("decisions", "d1").unwrap();
         assert_eq!(content, "version 2");
+    }
+
+    #[test]
+    fn write_and_read_poc_entry() {
+        let (_dir, mgr) = setup();
+        mgr.write_entry("poc", "p001-thrift-parsing", "# POC: Thrift Parsing\n\n**Goal**: Validate thrift parser crate.\n**Result**: pass\n**Learnings**: nom-based parser works.\n**Design Impact**: Use nom for all parsing.")
+            .unwrap();
+        let content = mgr.read_entry("poc", "p001-thrift-parsing").unwrap();
+        assert!(content.contains("**Result**: pass"));
+    }
+
+    #[test]
+    fn generate_index_empty_returns_empty() {
+        let (_dir, mgr) = setup();
+        let index = mgr.generate_index().unwrap();
+        assert!(index.is_empty());
+    }
+
+    #[test]
+    fn generate_index_lists_entries_with_headings() {
+        let (_dir, mgr) = setup();
+        mgr.write_entry("decisions", "use-vec", "# Use Vec<u8> for buffer\nSimpler than ring buffer.")
+            .unwrap();
+        mgr.write_entry("gotchas", "sqlx-nullable", "# sqlx requires Option<T> for nullable\nOtherwise panics.")
+            .unwrap();
+
+        let index = mgr.generate_index().unwrap();
+        assert!(index.contains("# Context Index"));
+        assert!(index.contains("## Decisions (1 entries)"));
+        assert!(index.contains("- use-vec: Use Vec<u8> for buffer"));
+        assert!(index.contains("## Gotchas (1 entries)"));
+        assert!(index.contains("- sqlx-nullable: sqlx requires Option<T> for nullable"));
+    }
+
+    #[test]
+    fn generate_index_skips_frontmatter() {
+        let (_dir, mgr) = setup();
+        mgr.write_reference("bf-tree", "https://example.com", &["rust"], "Key points about bf-tree")
+            .unwrap();
+
+        let index = mgr.generate_index().unwrap();
+        assert!(index.contains("- bf-tree: Key points about bf-tree"));
+        // Should NOT contain frontmatter
+        assert!(!index.contains("source:"));
+    }
+
+    #[test]
+    fn write_index_creates_file() {
+        let (_dir, mgr) = setup();
+        mgr.write_entry("decisions", "d1", "# Decision one").unwrap();
+        mgr.write_index().unwrap();
+
+        let path = _dir.path().join("context/INDEX.md");
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("- d1: Decision one"));
     }
 
     #[test]

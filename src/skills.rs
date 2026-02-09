@@ -9,6 +9,10 @@ pub fn forge_planning_files() -> Vec<(&'static str, &'static str)> {
             "COVERAGE.md",
             include_str!("../skills/forge-planning/COVERAGE.md"),
         ),
+        (
+            "REFERENCES.md",
+            include_str!("../skills/forge-planning/REFERENCES.md"),
+        ),
     ]
 }
 
@@ -25,6 +29,14 @@ pub fn forge_protocol_files() -> Vec<(&'static str, &'static str)> {
         (
             "CONTEXT-WRITING.md",
             include_str!("../skills/forge-protocol/CONTEXT-WRITING.md"),
+        ),
+        (
+            "CONTEXT-READING.md",
+            include_str!("../skills/forge-protocol/CONTEXT-READING.md"),
+        ),
+        (
+            "TESTING.md",
+            include_str!("../skills/forge-protocol/TESTING.md"),
         ),
     ]
 }
@@ -97,9 +109,10 @@ mod tests {
     }
 
     #[test]
-    fn planning_has_coverage() {
+    fn planning_has_coverage_and_references() {
         let files = forge_planning_files();
         assert!(files.iter().any(|(p, _)| *p == "COVERAGE.md"));
+        assert!(files.iter().any(|(p, _)| *p == "REFERENCES.md"));
     }
 
     #[test]
@@ -107,5 +120,7 @@ mod tests {
         let files = forge_protocol_files();
         assert!(files.iter().any(|(p, _)| *p == "CLAIMING.md"));
         assert!(files.iter().any(|(p, _)| *p == "CONTEXT-WRITING.md"));
+        assert!(files.iter().any(|(p, _)| *p == "CONTEXT-READING.md"));
+        assert!(files.iter().any(|(p, _)| *p == "TESTING.md"));
     }
 }

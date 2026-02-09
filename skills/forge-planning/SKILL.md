@@ -1,79 +1,165 @@
 ---
 name: forge-planning
 description: >
-  Analyze project design docs and generate features.json for forge orchestration.
-  Use when setting up a new forge project, when the user wants to plan features,
-  or when they say "forge planning", "plan features", or "generate features".
-  Checks design doc coverage, helps fill gaps, decomposes into features with
-  verify scripts and dependency ordering.
+  Project architect skill for forge. Detects planning phase (research, POC, full),
+  scaffolds DESIGN.md, generates features.json with verify scripts. Interactive —
+  discuss architecture with the user before generating features.
+  Triggers: "forge planning", "plan features", "generate features".
 ---
 
 # Forge Planning
 
-You are helping the user plan a forge project. This is an interactive conversation —
-discuss architecture decisions, help fill design doc gaps, then generate features.json.
+You are the project architect. You do NOT write application code. You scaffold the
+environment, define the roadmap, and create verify scripts.
 
-## Step 1: Read project state
+## Phase 1: Orientation
 
 Read these files (skip missing ones):
 - `forge.toml` — project config, scopes, principles
 - `DESIGN.md` — project design document
 - `features.json` — existing features (if replanning)
-- `context/` — any existing decisions, gotchas, patterns, references
+- `context/` — all existing decisions, gotchas, patterns, poc, references
 
-## Step 2: Check design doc coverage
+## Phase 2: Detect planning phase
 
-Read [COVERAGE.md](COVERAGE.md) for the 7 sections checklist. Report to the user:
-- Which sections are present and well-defined
-- Which sections are missing or vague
-- Why each missing section matters for agent execution
+Auto-detect based on project state:
 
-**Do not proceed to feature generation until the user is satisfied with coverage.**
-Help them fill gaps — suggest concrete types, error strategies, constraints.
+### Phase 0 — Research (no DESIGN.md or empty `context/references/`)
 
-## Step 3: Generate features
+The user has a goal but no design. Help them get there:
 
-Once the design doc is sufficient:
+1. Discuss the goal, constraints, and unknowns with the user
+2. **Gather reference material** — see [REFERENCES.md](REFERENCES.md) for the distillation protocol
+3. Help user set up `references/` (gitignored) for raw repos, PDFs, codebases
+4. Distill each source into `context/references/{topic}.md` organized by TOPIC, not by source
+5. **Extract patterns from references**: For each reference, decide — is this prescriptive enough
+   to be a rule? If yes, also write `context/patterns/{rule}.md`. The reference explains WHY
+   (knowledge), the pattern says WHAT TO DO (rule). Example: reference `rust-compile-optimization.md`
+   → pattern `cargo-dev-profile.md` ("always use mold linker, opt-level 3 for deps").
+6. Scaffold `DESIGN.md` with all 8 sections (see [COVERAGE.md](COVERAGE.md))
+6. Mark unknowns with `[ ]` checkboxes — things that need prototyping to answer
+7. Run `forge install` to regenerate `context/INDEX.md`
 
-1. Decompose into features — one per concrete deliverable
-2. Each feature needs:
-   ```json
-   {
-     "id": "f001",
-     "type": "implement",
-     "scope": "scope-name",
-     "description": "Concrete deliverable",
-     "verify": "./scripts/verify/f001.sh",
-     "depends_on": [],
-     "priority": 1,
-     "status": "pending",
-     "claimed_by": null,
-     "blocked_reason": null
-   }
-   ```
-3. Set `depends_on` based on data flow (what must exist before this works)
-4. Add `review` type features between implementation batches
-5. Write verify scripts that test the feature's actual deliverable
+All context written during research is immediately available to POC and implementation
+agents — context is shared across all phases via the file system.
 
-## Step 4: Write verify scripts
+**Definition of Done**: DESIGN.md exists with all 8 sections. Do NOT generate features yet.
+The user must review and approve the design before proceeding to Phase 1.
 
-For each feature, write `scripts/verify/{id}.sh`:
-- Must return exit code 0 on success, non-zero on failure
-- Test the actual deliverable, not just "does it compile"
-- Include: build check, specific tests, boundary checks where relevant
-- Review features: check fmt, clippy, scope boundary imports
+### Phase 1 — POC (DESIGN.md has `[ ]` unknowns)
 
-## Step 5: Validate
+Unknowns need prototyping before full implementation:
 
-Run `forge verify` to confirm all scripts are executable and valid.
-Review the full features.json with the user before finishing.
+1. Check DESIGN.md coverage per [COVERAGE.md](COVERAGE.md), report gaps
+2. For each `[ ]` unknown, generate a `"type": "poc"` feature with `p` prefix ID
+3. POC features validate assumptions — their deliverable is `context/poc/{id}.md`
+4. Add a `review` feature after each POC batch. The review feature must:
+   - Read `context/poc/` outcomes and update DESIGN.md unknowns
+   - **Promote proven approaches to patterns**: if a POC passed, convert the proven
+     technique from `references/` into a concrete `patterns/` entry that all agents follow
+5. POC verify scripts: run the viability test + check `context/poc/{id}.md` exists
 
-## Feature types
+**Definition of Done**: features.json has POC features with verify scripts. No implementation
+features yet — those come after POC results resolve unknowns.
 
-- `implement` — write code, verify with tests
-- `review` — check boundaries, update docs, verify with lint + import checks
+### Phase 2 — Full (no `[ ]` unknowns remain)
+
+All unknowns resolved (`[x]` confirmed or `[!]` pivoted):
+
+1. Check full coverage per [COVERAGE.md](COVERAGE.md) — all 8 sections complete
+2. Do not proceed until the user is satisfied with coverage
+3. Decompose into `implement` + `review` features with proper deps
+4. Review features check scope boundaries between implementation batches
+
+**Definition of Done**: features.json has full production features, all verify scripts written.
+
+## Phase 3: Generate features
+
+Feature JSON schema:
+```json
+{
+  "id": "f001",
+  "type": "implement",
+  "scope": "scope-name",
+  "description": "Concrete deliverable. See context/references/memory-management.md for allocator patterns.",
+  "verify": "./scripts/verify/f001.sh",
+  "depends_on": [],
+  "priority": 1,
+  "status": "pending",
+  "claimed_by": null,
+  "blocked_reason": null,
+  "context_hints": ["references/memory-management", "decisions/use-vec"]
+}
+```
+
+Feature types:
+- `implement` — write code, verify with tests. Use `f` prefix IDs.
+- `review` — check boundaries, update docs, verify with lint + import checks. Use `r` prefix IDs.
+- `poc` — prototype to resolve unknowns. Use `p` prefix IDs.
+
+### `context_hints` — push context, don't make agents pull
+
+For each feature, list the context entries the agent should read. Format: `"category/slug"`.
+The agent reads these during orientation — no scanning or browsing needed.
+
+How to decide what to include:
+- Which `context/references/` entries cover patterns the agent will need?
+- Which `context/decisions/` explain choices that constrain this feature?
+- Which `context/gotchas/` warn about pitfalls in this feature's area?
+- If the feature depends on a POC, include `poc/{id}`
+
+Also embed the most critical pointer in the `description` text itself — the agent
+reads the description first and may not check `context_hints` until later.
+
+Set `depends_on` based on data flow (what must exist before this works).
+Add `review` features between implementation batches.
+POC features depend only on scaffold — they should be early in the plan.
+
+## Phase 4: Write verify scripts with principle enforcement
+
+Write `scripts/verify/{id}.sh` for each feature. Every verify script enforces the 4 principles:
+
+**P3 (Style) — every script includes:**
+```bash
+cargo fmt --check || exit 1
+cargo clippy -- -D warnings || exit 1
+```
+
+**P2 (Proof) — implement features:**
+- Run specific tests that prove the deliverable works, not just compilation
+- Tests must follow the 7 testing rules (behavior-based, edge cases, descriptive names)
+
+**P2 (Proof) — POC features:**
+- Run the viability test for the POC
+- Check outcome file exists: `test -f context/poc/{id}.md || exit 1`
+
+**P4 (Boundaries) — review features:**
+- Check scope boundary imports (no internal cross-scope access)
+- Verify API surface matches design doc
+
+## Phase 5: DESIGN.md unknowns format
+
+Use checkboxes to track unknowns:
+- `[ ]` — unresolved, needs POC or research
+- `[x]` — resolved, confirmed by POC or decision
+- `[!]` — pivoted, original approach failed, see `context/poc/` for details
+
+Each unknown should reference a POC feature ID when one exists:
+```markdown
+[ ] Can nom parse our thrift IDL dialect? → p001
+[x] SQLite handles our write volume → p002 (confirmed: 50k writes/sec)
+[!] Redis pub/sub too complex for MVP → p003 (pivoted to channels)
+```
+
+## Phase 6: Validate
+
+1. Run `forge verify` to confirm all scripts are executable and valid
+2. Review the full features.json with the user
+3. Confirm dependency ordering makes sense
+4. Ensure every feature has a verify script that actually tests its deliverable
 
 ## Priority ordering
 
 Lower number = higher priority. Features with unmet deps are auto-skipped.
 Group by scope, order by data flow within scope.
+POC features should have the lowest priority numbers (run first).

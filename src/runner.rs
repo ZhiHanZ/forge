@@ -562,6 +562,7 @@ mod tests {
                 status: FeatureStatus::Done,
                 claimed_by: Some("prev-agent".into()),
                 blocked_reason: None,
+                context_hints: vec![],
             }],
         );
 
@@ -603,6 +604,7 @@ mod tests {
                 status: FeatureStatus::Pending,
                 claimed_by: None,
                 blocked_reason: None,
+                context_hints: vec![],
             }],
         );
 
@@ -661,6 +663,7 @@ mod tests {
                 status: FeatureStatus::Pending,
                 claimed_by: None,
                 blocked_reason: None,
+                context_hints: vec![],
             }],
         );
 
@@ -705,6 +708,7 @@ mod tests {
                 status: FeatureStatus::Pending,
                 claimed_by: None,
                 blocked_reason: None,
+                context_hints: vec![],
             }],
         );
 
@@ -744,6 +748,7 @@ mod tests {
                 status: FeatureStatus::Pending,
                 claimed_by: None,
                 blocked_reason: None,
+                context_hints: vec![],
             }],
         );
 

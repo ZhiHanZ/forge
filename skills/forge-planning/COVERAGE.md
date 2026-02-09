@@ -1,6 +1,6 @@
 # Design Doc Coverage Checklist
 
-Check DESIGN.md for these 7 sections. Each missing section is a topic agents will
+Check DESIGN.md for these 8 sections. Each missing section is a topic agents will
 web-search for during implementation — filling it now saves tokens across every session.
 
 ## 1. Data Model
@@ -68,3 +68,24 @@ async fn test_create_user() {
 }
 ```
 **Bad**: "Write tests for all endpoints"
+
+## 8. Unknowns
+Questions that need prototyping or research before implementation can proceed.
+
+**Without this**: agents make assumptions about unproven approaches, build on shaky foundations,
+and discover problems late when rework is expensive.
+
+Use checkbox format to track resolution:
+- `[ ]` — unresolved, needs POC or research
+- `[x]` — resolved, confirmed by POC or decision
+- `[!]` — pivoted, original approach failed
+
+Each unknown should reference a POC feature ID:
+```markdown
+[ ] Can nom parse our thrift IDL dialect? → p001
+[x] SQLite handles our write volume → p002 (confirmed: 50k writes/sec)
+[!] Redis pub/sub too complex for MVP → p003 (pivoted to channels)
+```
+
+**Good**: "[ ] Can we use wasm-bindgen for the rendering pipeline? Unknown perf characteristics with large DOMs."
+**Bad**: (no unknowns listed — implies everything is certain, which is rarely true for new projects)

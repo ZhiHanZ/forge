@@ -10,6 +10,7 @@ markdown file in `context/{category}/`.
 | `decisions/` | Why a choice was made | "Use Vec<u8> not ring buffer: simpler, in-memory only" |
 | `gotchas/` | Pitfalls you encountered | "sqlx requires Option<T> for nullable columns" |
 | `patterns/` | Code conventions worth following | "Handler signature: async fn(State, Json<Req>) -> Result<Json<Res>>" |
+| `poc/` | POC outcomes (goal, result, learnings, design impact) | "Thrift parsing: nom works, 2x faster than pest" |
 | `references/` | External knowledge for rediscovery | Distilled blog posts, library patterns, paper insights |
 
 ## Writing good entries
@@ -17,7 +18,23 @@ markdown file in `context/{category}/`.
 - One concept per file. Name the file after the concept: `use-vec-not-ringbuffer.md`
 - Be concrete: include code snippets, not descriptions
 - Include WHY, not just WHAT — future agents need the reasoning
-- Keep under 50 lines for decisions/gotchas/patterns, under 300 for references
+- Keep under 50 lines for decisions/gotchas/patterns/poc, under 300 for references
+
+## POC outcome protocol
+
+When completing a POC feature, write `context/poc/{feature-id}.md` with this structure:
+
+```markdown
+# POC: {description}
+
+**Goal**: What we're trying to validate (one sentence)
+**Result**: pass | fail | partial
+**Learnings**: What we discovered (concrete findings, not vague impressions)
+**Design Impact**: Which DESIGN.md sections need updating and how
+```
+
+Keep under 50 lines. Focus on actionable findings. If the POC failed, explain what
+would need to change for it to work (different tech, different approach, reduced scope).
 
 ## Reference protocol
 

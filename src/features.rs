@@ -22,6 +22,11 @@ pub struct Feature {
     pub status: FeatureStatus,
     pub claimed_by: Option<String>,
     pub blocked_reason: Option<String>,
+    /// Context entries relevant to this feature. Planner embeds these so agents
+    /// don't need to scan INDEX.md — the right context is pushed, not pulled.
+    /// Format: "category/slug" (e.g. "references/memory-management", "gotchas/sqlx-nullable")
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_hints: Vec<String>,
 }
 
 fn default_priority() -> u32 {
@@ -33,6 +38,7 @@ fn default_priority() -> u32 {
 pub enum FeatureType {
     Implement,
     Review,
+    Poc,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -237,6 +243,7 @@ mod tests {
                     status: FeatureStatus::Pending,
                     claimed_by: None,
                     blocked_reason: None,
+                    context_hints: vec![],
                 },
                 Feature {
                     id: "f002".into(),
@@ -249,6 +256,7 @@ mod tests {
                     status: FeatureStatus::Pending,
                     claimed_by: None,
                     blocked_reason: None,
+                    context_hints: vec![],
                 },
                 Feature {
                     id: "f003".into(),
@@ -261,6 +269,7 @@ mod tests {
                     status: FeatureStatus::Pending,
                     claimed_by: None,
                     blocked_reason: None,
+                    context_hints: vec![],
                 },
             ],
         }
@@ -367,6 +376,26 @@ mod tests {
         assert!(json.contains("\"type\": \"implement\""));
         assert!(json.contains("\"status\": \"pending\""));
         assert!(json.contains("\"depends_on\""));
+        // context_hints should be omitted when empty
+        assert!(!json.contains("context_hints"));
+    }
+
+    #[test]
+    fn context_hints_roundtrip() {
+        let mut list = sample_features();
+        list.features[0].context_hints = vec![
+            "references/memory-management".into(),
+            "gotchas/sqlx-nullable".into(),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        list.save(dir.path()).unwrap();
+        let loaded = FeatureList::load(dir.path()).unwrap();
+        assert_eq!(loaded.features[0].context_hints, vec![
+            "references/memory-management",
+            "gotchas/sqlx-nullable",
+        ]);
+        // Features without hints should deserialize with empty vec
+        assert!(loaded.features[1].context_hints.is_empty());
     }
 
     #[test]
@@ -392,6 +421,28 @@ mod tests {
         let claimable = list.next_n_claimable(1);
         assert_eq!(claimable.len(), 1);
         assert_eq!(claimable[0].id, "f002"); // highest priority
+    }
+
+    #[test]
+    fn poc_feature_serializes() {
+        let poc = Feature {
+            id: "p001".into(),
+            feature_type: FeatureType::Poc,
+            scope: "data-model".into(),
+            description: "Validate thrift parsing approach".into(),
+            verify: "./scripts/verify/p001.sh".into(),
+            depends_on: vec![],
+            priority: 1,
+            status: FeatureStatus::Pending,
+            claimed_by: None,
+            blocked_reason: None,
+            context_hints: vec!["references/rpc-patterns".into()],
+        };
+        let json = serde_json::to_string_pretty(&poc).unwrap();
+        assert!(json.contains("\"type\": \"poc\""));
+        let roundtrip: Feature = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.feature_type, FeatureType::Poc);
+        assert_eq!(roundtrip.context_hints, vec!["references/rpc-patterns"]);
     }
 
     #[test]

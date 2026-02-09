@@ -47,13 +47,13 @@ pub struct RoleConfig {
     /// Executor: implements features. Needs strong coding ability.
     #[serde(default = "default_role_protocol")]
     pub protocol: RoleSpec,
-    /// Reviewer: post-session feedback formatting + triage. Cheap & fast.
+    /// Reviewer: principle enforcement, knowledge curation, pattern promotion.
     #[serde(default = "default_role_orchestrating")]
     pub orchestrating: RoleSpec,
-    /// Architect: design doc analysis + feature decomposition.
+    /// Architect: design doc analysis, reference distillation, feature decomposition.
     #[serde(default = "default_role_planning")]
     pub planning: RoleSpec,
-    /// Replanning: context-aware plan modification.
+    /// Replanning: context-aware plan modification, POC pivot handling.
     #[serde(default = "default_role_adjusting")]
     pub adjusting: RoleSpec,
 }
@@ -95,10 +95,10 @@ fn default_role_protocol() -> RoleSpec {
     RoleSpec { backend: "claude".into(), model: "sonnet".into() }
 }
 fn default_role_orchestrating() -> RoleSpec {
-    RoleSpec { backend: "claude".into(), model: "haiku".into() }
+    RoleSpec { backend: "claude".into(), model: "sonnet".into() }
 }
 fn default_role_planning() -> RoleSpec {
-    RoleSpec { backend: "claude".into(), model: "sonnet".into() }
+    RoleSpec { backend: "claude".into(), model: "opus".into() }
 }
 fn default_role_adjusting() -> RoleSpec {
     RoleSpec { backend: "claude".into(), model: "sonnet".into() }
@@ -198,11 +198,11 @@ model = "sonnet"
 
 [forge.roles.orchestrating]
 backend = "claude"
-model = "haiku"
+model = "sonnet"
 
 [forge.roles.planning]
-backend = "codex"
-model = "o3"
+backend = "claude"
+model = "opus"
 
 [forge.roles.adjusting]
 backend = "claude"
@@ -235,9 +235,9 @@ upstream = ["data-model"]
         assert_eq!(config.forge.roles.protocol.backend, "claude");
         assert_eq!(config.forge.roles.protocol.model, "sonnet");
         assert_eq!(config.forge.roles.orchestrating.backend, "claude");
-        assert_eq!(config.forge.roles.orchestrating.model, "haiku");
-        assert_eq!(config.forge.roles.planning.backend, "codex");
-        assert_eq!(config.forge.roles.planning.model, "o3");
+        assert_eq!(config.forge.roles.orchestrating.model, "sonnet");
+        assert_eq!(config.forge.roles.planning.backend, "claude");
+        assert_eq!(config.forge.roles.planning.model, "opus");
         assert!(!config.principles.readability.is_empty());
         assert_eq!(config.scopes.len(), 2);
     }
@@ -255,7 +255,8 @@ name = "bare"
         // Defaults: all roles use claude
         assert_eq!(config.forge.roles.protocol.backend, "claude");
         assert_eq!(config.forge.roles.protocol.model, "sonnet");
-        assert_eq!(config.forge.roles.orchestrating.model, "haiku");
+        assert_eq!(config.forge.roles.orchestrating.model, "sonnet");
+        assert_eq!(config.forge.roles.planning.model, "opus");
         assert!(config.scopes.is_empty());
     }
 
@@ -305,11 +306,12 @@ model = "haiku"
         let config: ForgeConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.forge.roles.protocol.backend, "codex");
         assert_eq!(config.forge.roles.protocol.model, "o3");
+        // Explicitly overridden to haiku — user choice is respected
         assert_eq!(config.forge.roles.orchestrating.backend, "claude");
         assert_eq!(config.forge.roles.orchestrating.model, "haiku");
         // Unspecified roles get defaults
         assert_eq!(config.forge.roles.planning.backend, "claude");
-        assert_eq!(config.forge.roles.planning.model, "sonnet");
+        assert_eq!(config.forge.roles.planning.model, "opus");
     }
 
     #[test]

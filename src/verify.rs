@@ -119,6 +119,7 @@ mod tests {
             status,
             claimed_by: None,
             blocked_reason: None,
+            context_hints: vec![],
         }
     }
 
