@@ -169,11 +169,15 @@ fn open_next_feature_pane(
     size: Size,
     config: &RunConfig,
 ) -> Option<String> {
-    let features = FeatureList::load(&config.project_dir).ok()?;
+    let mut features = FeatureList::load(&config.project_dir).ok()?;
     let next = features.next_claimable()?;
     let feature_id = next.id.clone();
 
     let agent_id = format!("agent-{}", panes.len() + 1);
+
+    // Claim the feature so other panes don't pick the same one
+    let _ = features.claim(&feature_id, &agent_id);
+    let _ = features.save(&config.project_dir);
     let prompt = format!(
         "You are a forge agent. Your assigned feature is {feature_id}. \
          Read features.json for details. Follow the forge-protocol skill. \
