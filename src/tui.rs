@@ -1,141 +1,220 @@
-use std::io::{self, BufWriter, Read, Write};
+use std::io::{self, Read as _};
+use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use bytes::Bytes;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use tokio::sync::mpsc::{Sender, channel};
-use tokio::task::spawn_blocking;
 use tui_term::widget::{Cursor, PseudoTerminal};
 
 use crate::config::RoleSpec;
 use crate::features::{FeatureList, StatusCounts};
 use crate::runner::{self, RunConfig};
 
+/// Set terminal size on a PTY master FD via ioctl(TIOCSWINSZ).
+fn set_terminal_size(fd: RawFd, rows: u16, cols: u16) {
+    let winsize = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    unsafe {
+        libc::ioctl(fd, libc::TIOCSWINSZ, &winsize);
+    }
+}
+
 struct PtyPane {
     parser: Arc<RwLock<vt100::Parser>>,
-    sender: Sender<Bytes>,
-    master_pty: Box<dyn MasterPty>,
+    sender: std::sync::mpsc::Sender<Vec<u8>>,
+    master_fd: RawFd,
+    child_pid: Option<u32>,
     exited: Arc<AtomicBool>,
     feature_id: Option<String>,
     agent_id: String,
+    last_size: (u16, u16),
 }
 
 impl PtyPane {
     fn new(
         rows: u16,
         cols: u16,
-        cmd: CommandBuilder,
-        feature_id: Option<String>,
+        cmd: &str,
+        args: &[String],
+        cwd: &Path,
         agent_id: String,
+        feature_id: Option<String>,
     ) -> io::Result<Self> {
-        let pty_system = native_pty_system();
-        let pty_pair = pty_system
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        // Open PTY pair
+        let pty = nix::pty::openpty(None, None)
+            .map_err(io::Error::other)?;
+        let master_fd = pty.master.into_raw_fd();
+        let slave_fd = pty.slave.into_raw_fd();
+
+        // Set initial terminal size
+        set_terminal_size(master_fd, rows, cols);
+
+        // Dup master FD for reader and writer threads (each owns its dup)
+        let reader_fd = unsafe { libc::dup(master_fd) };
+        if reader_fd < 0 {
+            unsafe {
+                libc::close(master_fd);
+                libc::close(slave_fd);
+            }
+            return Err(io::Error::last_os_error());
+        }
+        let writer_fd = unsafe { libc::dup(master_fd) };
+        if writer_fd < 0 {
+            unsafe {
+                libc::close(master_fd);
+                libc::close(slave_fd);
+                libc::close(reader_fd);
+            }
+            return Err(io::Error::last_os_error());
+        }
+
+        // Spawn child process with PTY slave as controlling terminal
+        let mut command = std::process::Command::new(cmd);
+        command.args(args);
+        command.current_dir(cwd);
+        command.env("FORGE_AGENT_ID", &agent_id);
+        unsafe {
+            command.pre_exec(move || {
+                // Close parent-only FDs in child
+                libc::close(master_fd);
+                libc::close(reader_fd);
+                libc::close(writer_fd);
+                // Set up slave as controlling terminal + stdin/stdout/stderr
+                if libc::login_tty(slave_fd) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = match command.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                unsafe {
+                    libc::close(master_fd);
+                    libc::close(slave_fd);
+                    libc::close(reader_fd);
+                    libc::close(writer_fd);
+                }
+                return Err(e);
+            }
+        };
+        let child_pid = Some(child.id());
+
+        // Close slave in parent (child has its own copy after fork)
+        unsafe {
+            libc::close(slave_fd);
+        }
 
         let parser = Arc::new(RwLock::new(vt100::Parser::new(rows, cols, 10000)));
         let exited = Arc::new(AtomicBool::new(false));
 
-        // Spawn the child process on the slave side of the PTY
+        // Child exit handler thread
         {
-            let exited_clone = exited.clone();
-            spawn_blocking(move || {
-                match pty_pair.slave.spawn_command(cmd) {
-                    Ok(mut child) => {
-                        let _ = child.wait();
-                    }
-                    Err(_) => {}
-                }
-                exited_clone.store(true, Ordering::Relaxed);
-                drop(pty_pair.slave);
+            let exited = exited.clone();
+            std::thread::spawn(move || {
+                let mut child = child;
+                let _ = child.wait();
+                exited.store(true, Ordering::Release);
             });
         }
 
-        // Read PTY output and feed it to vt100::Parser.
-        // Uses spawn_blocking because reader.read() is synchronous and would
-        // starve the tokio async worker threads if run via tokio::spawn.
+        // Reader thread: 64KB buffer, feeds vt100 parser
         {
-            let mut reader = pty_pair
-                .master
-                .try_clone_reader()
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
             let parser = parser.clone();
-            spawn_blocking(move || {
-                let mut buf = [0u8; 8192];
+            let exited = exited.clone();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 65536];
+                let mut file = unsafe { std::fs::File::from_raw_fd(reader_fd) };
                 loop {
-                    match reader.read(&mut buf) {
+                    match file.read(&mut buf) {
                         Ok(0) | Err(_) => break,
-                        Ok(size) => {
-                            if let Ok(mut parser) = parser.write() {
-                                parser.process(&buf[..size]);
+                        Ok(n) => {
+                            if let Ok(mut p) = parser.write() {
+                                p.process(&buf[..n]);
                             }
                         }
                     }
                 }
+                exited.store(true, Ordering::Release);
             });
         }
 
-        // Channel for writing keyboard input to the PTY
-        let (tx, mut rx) = channel::<Bytes>(32);
-
-        let writer = pty_pair
-            .master
-            .take_writer()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-        let mut writer = BufWriter::new(writer);
-        tokio::spawn(async move {
-            while let Some(bytes) = rx.recv().await {
-                if writer.write_all(&bytes).is_err() {
-                    break;
+        // Writer thread: synchronous writes with tcdrain (prevents deadlocks)
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            while let Ok(bytes) = rx.recv() {
+                unsafe {
+                    libc::write(
+                        writer_fd,
+                        bytes.as_ptr() as *const libc::c_void,
+                        bytes.len(),
+                    );
+                    libc::tcdrain(writer_fd);
                 }
-                let _ = writer.flush();
+            }
+            unsafe {
+                libc::close(writer_fd);
             }
         });
 
         Ok(Self {
             parser,
             sender: tx,
-            master_pty: pty_pair.master,
+            master_fd,
+            child_pid,
             exited,
             feature_id,
             agent_id,
+            last_size: (rows, cols),
         })
     }
 
-    /// Resize the PTY and vt100 parser to match the given inner area.
-    fn resize_to_inner(&self, inner: Rect) {
-        if inner.width == 0 || inner.height == 0 {
+    /// Resize the PTY and vt100 parser when dimensions actually change.
+    fn resize_to_inner(&mut self, inner: Rect) {
+        let new_size = (inner.height, inner.width);
+        if new_size == self.last_size || inner.width == 0 || inner.height == 0 {
             return;
         }
+        self.last_size = new_size;
         if let Ok(mut parser) = self.parser.write() {
-            let screen = parser.screen();
-            if screen.size() != (inner.height, inner.width) {
-                parser.screen_mut().set_size(inner.height, inner.width);
-            }
+            parser.screen_mut().set_size(inner.height, inner.width);
         }
-        let _ = self.master_pty.resize(PtySize {
-            rows: inner.height,
-            cols: inner.width,
-            pixel_width: 0,
-            pixel_height: 0,
-        });
+        set_terminal_size(self.master_fd, inner.height, inner.width);
     }
 
     fn is_alive(&self) -> bool {
-        !self.exited.load(Ordering::Relaxed)
+        !self.exited.load(Ordering::Acquire)
+    }
+
+    fn kill(&self) {
+        if let Some(pid) = self.child_pid {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGHUP);
+            }
+        }
+    }
+}
+
+impl Drop for PtyPane {
+    fn drop(&mut self) {
+        self.kill();
+        if self.master_fd >= 0 {
+            unsafe {
+                libc::close(self.master_fd);
+            }
+            self.master_fd = -1;
+        }
     }
 }
 
@@ -150,15 +229,15 @@ fn spawn_pty_agent(
     feature_id: Option<String>,
 ) -> io::Result<PtyPane> {
     let (cmd_name, args) = runner::build_agent_command(role, prompt);
-
-    let mut cmd = CommandBuilder::new(&cmd_name);
-    for arg in &args {
-        cmd.arg(arg);
-    }
-    cmd.cwd(project_dir);
-    cmd.env("FORGE_AGENT_ID", agent_id);
-
-    PtyPane::new(rows, cols, cmd, feature_id, agent_id.to_string())
+    PtyPane::new(
+        rows,
+        cols,
+        &cmd_name,
+        &args,
+        project_dir,
+        agent_id.to_string(),
+        feature_id,
+    )
 }
 
 /// Open a new pane for the next claimable feature.
@@ -204,7 +283,7 @@ fn open_next_feature_pane(
 }
 
 /// Route keyboard input to a PTY pane.
-async fn handle_pane_key_event(sender: &Sender<Bytes>, key: &KeyEvent) -> bool {
+fn handle_pane_key_event(sender: &std::sync::mpsc::Sender<Vec<u8>>, key: &KeyEvent) -> bool {
     let input_bytes = match key.code {
         KeyCode::Char(ch) => {
             let mut send = vec![ch as u8];
@@ -243,7 +322,7 @@ async fn handle_pane_key_event(sender: &Sender<Bytes>, key: &KeyEvent) -> bool {
         _ => return true,
     };
 
-    sender.send(Bytes::from(input_bytes)).await.ok();
+    let _ = sender.send(input_bytes);
     true
 }
 
@@ -397,6 +476,7 @@ fn is_ctrl_g(key: &KeyEvent) -> bool {
 }
 
 /// Main TUI entry point. Spawns agents in PTY panes and renders them.
+#[allow(clippy::unused_async)]
 pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
     // Set up panic hook to restore terminal
     std::panic::set_hook(Box::new(|panic| {
@@ -444,8 +524,9 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
                 .style(Style::default().fg(Color::Yellow));
                 frame.render_widget(msg, pane_area);
             } else {
-                for (index, pane) in panes.iter().enumerate() {
-                    let chunk = grid_rect(pane_area, index, panes.len());
+                let num_panes = panes.len();
+                for (index, pane) in panes.iter_mut().enumerate() {
+                    let chunk = grid_rect(pane_area, index, num_panes);
 
                     let pane_num = index + 1;
                     let title = match &pane.feature_id {
@@ -554,7 +635,7 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
                         // Normal mode: forward everything to the active pane
                         if let Some(idx) = active_pane {
                             if idx < panes.len() {
-                                handle_pane_key_event(&panes[idx].sender, &key).await;
+                                handle_pane_key_event(&panes[idx].sender, &key);
                             }
                         }
                     }
@@ -820,110 +901,100 @@ mod tests {
 
     // ── handle_pane_key_event tests ──────────────────────────────────
 
-    async fn send_key_and_recv(code: KeyCode, modifiers: KeyModifiers) -> Vec<u8> {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Bytes>(32);
+    fn send_key_and_recv(code: KeyCode, modifiers: KeyModifiers) -> Vec<u8> {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
         let key = make_key(code, modifiers);
-        handle_pane_key_event(&tx, &key).await;
+        handle_pane_key_event(&tx, &key);
         drop(tx);
         let mut result = Vec::new();
-        while let Some(bytes) = rx.recv().await {
+        while let Ok(bytes) = rx.recv() {
             result.extend_from_slice(&bytes);
         }
         result
     }
 
-    #[tokio::test]
-    async fn key_event_enter() {
-        let bytes = send_key_and_recv(KeyCode::Enter, KeyModifiers::NONE).await;
+    #[test]
+    fn key_event_enter() {
+        let bytes = send_key_and_recv(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(bytes, vec![0x0D]);
     }
 
-    #[tokio::test]
-    async fn key_event_char_a() {
-        let bytes = send_key_and_recv(KeyCode::Char('a'), KeyModifiers::NONE).await;
+    #[test]
+    fn key_event_char_a() {
+        let bytes = send_key_and_recv(KeyCode::Char('a'), KeyModifiers::NONE);
         assert_eq!(bytes, vec![b'a']);
     }
 
-    #[tokio::test]
-    async fn key_event_ctrl_c() {
-        let bytes = send_key_and_recv(KeyCode::Char('c'), KeyModifiers::CONTROL).await;
+    #[test]
+    fn key_event_ctrl_c() {
+        let bytes = send_key_and_recv(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(bytes, vec![3]); // 'C' - 64 = 3
     }
 
-    #[tokio::test]
-    async fn key_event_esc() {
-        let bytes = send_key_and_recv(KeyCode::Esc, KeyModifiers::NONE).await;
+    #[test]
+    fn key_event_esc() {
+        let bytes = send_key_and_recv(KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(bytes, vec![27]);
     }
 
-    #[tokio::test]
-    async fn key_event_arrow_up() {
-        let bytes = send_key_and_recv(KeyCode::Up, KeyModifiers::NONE).await;
+    #[test]
+    fn key_event_arrow_up() {
+        let bytes = send_key_and_recv(KeyCode::Up, KeyModifiers::NONE);
         assert_eq!(bytes, vec![27, 91, 65]);
     }
 
-    #[tokio::test]
-    async fn key_event_arrow_down() {
-        let bytes = send_key_and_recv(KeyCode::Down, KeyModifiers::NONE).await;
+    #[test]
+    fn key_event_arrow_down() {
+        let bytes = send_key_and_recv(KeyCode::Down, KeyModifiers::NONE);
         assert_eq!(bytes, vec![27, 91, 66]);
     }
 
-    #[tokio::test]
-    async fn key_event_arrow_right() {
-        let bytes = send_key_and_recv(KeyCode::Right, KeyModifiers::NONE).await;
+    #[test]
+    fn key_event_arrow_right() {
+        let bytes = send_key_and_recv(KeyCode::Right, KeyModifiers::NONE);
         assert_eq!(bytes, vec![27, 91, 67]);
     }
 
-    #[tokio::test]
-    async fn key_event_arrow_left() {
-        let bytes = send_key_and_recv(KeyCode::Left, KeyModifiers::NONE).await;
+    #[test]
+    fn key_event_arrow_left() {
+        let bytes = send_key_and_recv(KeyCode::Left, KeyModifiers::NONE);
         assert_eq!(bytes, vec![27, 91, 68]);
     }
 
-    #[tokio::test]
-    async fn key_event_tab() {
-        let bytes = send_key_and_recv(KeyCode::Tab, KeyModifiers::NONE).await;
+    #[test]
+    fn key_event_tab() {
+        let bytes = send_key_and_recv(KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(bytes, vec![9]);
     }
 
-    #[tokio::test]
-    async fn key_event_backspace() {
-        let bytes = send_key_and_recv(KeyCode::Backspace, KeyModifiers::NONE).await;
+    #[test]
+    fn key_event_backspace() {
+        let bytes = send_key_and_recv(KeyCode::Backspace, KeyModifiers::NONE);
         assert_eq!(bytes, vec![8]);
     }
 
-    #[tokio::test]
-    async fn key_event_unhandled_sends_nothing() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Bytes>(32);
+    #[test]
+    fn key_event_unhandled_sends_nothing() {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
         let key = make_key(KeyCode::F(1), KeyModifiers::NONE);
-        handle_pane_key_event(&tx, &key).await;
+        handle_pane_key_event(&tx, &key);
         drop(tx);
-        assert!(rx.recv().await.is_none());
+        assert!(rx.recv().is_err());
     }
 
     // ── cleanup_exited_panes tests ───────────────────────────────────
 
     fn mock_pane(agent_id: &str, exited: bool) -> PtyPane {
-        let pty_system = native_pty_system();
-        let pty_pair = pty_system
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("openpty failed in test");
-        // Drop the slave immediately — we don't need to spawn anything
-        drop(pty_pair.slave);
-
-        let (tx, _rx) = tokio::sync::mpsc::channel::<Bytes>(1);
+        let (tx, _rx) = std::sync::mpsc::channel::<Vec<u8>>();
         PtyPane {
             parser: Arc::new(RwLock::new(vt100::Parser::new(24, 80, 0))),
             sender: tx,
-            master_pty: pty_pair.master,
+            master_fd: -1,
+            child_pid: None,
             exited: Arc::new(AtomicBool::new(exited)),
             feature_id: None,
             agent_id: agent_id.to_string(),
+            last_size: (24, 80),
         }
     }
 
@@ -1073,5 +1144,313 @@ mod tests {
         };
         let text = render_status_bar_to_string(&counts, false);
         assert!(text.contains("0/0 done (0%)"), "got: {text}");
+    }
+
+    // ── resize debounce tests ────────────────────────────────────────
+
+    #[test]
+    fn resize_debounce_skips_same_size() {
+        let mut pane = mock_pane("a1", false);
+        pane.last_size = (24, 80);
+        // Same size should be a no-op
+        pane.resize_to_inner(Rect::new(0, 0, 80, 24));
+        assert_eq!(pane.last_size, (24, 80));
+    }
+
+    #[test]
+    fn resize_debounce_updates_on_change() {
+        let mut pane = mock_pane("a1", false);
+        pane.last_size = (24, 80);
+        // Different size should update
+        pane.resize_to_inner(Rect::new(0, 0, 120, 40));
+        assert_eq!(pane.last_size, (40, 120));
+    }
+
+    #[test]
+    fn resize_debounce_skips_zero_dimensions() {
+        let mut pane = mock_pane("a1", false);
+        pane.last_size = (24, 80);
+        pane.resize_to_inner(Rect::new(0, 0, 0, 24));
+        assert_eq!(pane.last_size, (24, 80));
+        pane.resize_to_inner(Rect::new(0, 0, 80, 0));
+        assert_eq!(pane.last_size, (24, 80));
+    }
+
+    // ── kill / signal tests ──────────────────────────────────────────
+
+    #[test]
+    fn kill_sends_sighup() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let mut pane = mock_pane("a1", false);
+        pane.child_pid = Some(pid);
+        pane.kill();
+        std::thread::sleep(Duration::from_millis(100));
+        // SIGHUP should have terminated the process
+        let status = child.try_wait().unwrap();
+        assert!(status.is_some(), "process should have exited after SIGHUP");
+        // Prevent Drop from sending another SIGHUP (harmless but clean)
+        pane.child_pid = None;
+    }
+
+    // ── ANSI fixture tests (zellij pattern: feed bytes, check screen) ──
+
+    /// Feed raw bytes into a vt100::Parser and return screen contents.
+    /// This is the zellij pattern: no PTY needed, tests parser rendering.
+    fn feed_bytes(rows: u16, cols: u16, bytes: &[u8]) -> String {
+        let mut parser = vt100::Parser::new(rows, cols, 0);
+        parser.process(bytes);
+        parser.screen().contents()
+    }
+
+    #[test]
+    fn ansi_plain_text() {
+        let screen = feed_bytes(24, 80, b"Hello, world!");
+        assert!(screen.contains("Hello, world!"), "got: {screen}");
+    }
+
+    #[test]
+    fn ansi_newline_and_cr() {
+        let screen = feed_bytes(24, 80, b"line1\r\nline2\r\nline3");
+        assert!(screen.contains("line1"), "got: {screen}");
+        assert!(screen.contains("line2"), "got: {screen}");
+        assert!(screen.contains("line3"), "got: {screen}");
+    }
+
+    #[test]
+    fn ansi_cursor_movement() {
+        // Write "AB", move cursor left 1, overwrite with "X" → "AX"
+        let screen = feed_bytes(24, 80, b"AB\x1b[1DX");
+        assert!(screen.contains("AX"), "got: {screen}");
+    }
+
+    #[test]
+    fn ansi_erase_line() {
+        // Write "Hello", then erase from cursor to end of line
+        // \x1b[H moves to home, write "Hello", \r goes to col 0, \x1b[K erases line
+        let screen = feed_bytes(24, 80, b"Hello\r\x1b[K");
+        // Line should be blank after erase
+        assert!(!screen.contains("Hello"), "erase failed, got: {screen}");
+    }
+
+    #[test]
+    fn ansi_sgr_colors_dont_corrupt_text() {
+        // SGR color codes should not appear as text
+        // \x1b[31m = red, \x1b[0m = reset
+        let screen = feed_bytes(24, 80, b"\x1b[31mRed text\x1b[0m Normal");
+        assert!(screen.contains("Red text"), "got: {screen}");
+        assert!(screen.contains("Normal"), "got: {screen}");
+        assert!(!screen.contains("[31m"), "raw escape leaked: {screen}");
+    }
+
+    #[test]
+    fn ansi_cursor_save_restore() {
+        // DECSC (\x1b7) saves cursor at col 5, DECRC (\x1b8) restores it
+        let screen = feed_bytes(24, 80, b"Hello\x1b7 World\x1b8XYZ");
+        // After restore, cursor is back at col 5, "XYZ" overwrites " Wo"
+        // Result: "HelloXYZrld"
+        assert!(screen.contains("HelloXYZrld"), "got: {screen}");
+    }
+
+    #[test]
+    fn ansi_clear_screen() {
+        let screen = feed_bytes(24, 80, b"garbage\x1b[2J\x1b[HClean");
+        // \x1b[2J clears screen, \x1b[H homes cursor
+        assert!(screen.contains("Clean"), "got: {screen}");
+        assert!(!screen.contains("garbage"), "clear failed, got: {screen}");
+    }
+
+    #[test]
+    fn ansi_line_wrap() {
+        // Write exactly 80 chars + 1 more — should wrap to next line
+        let line = "A".repeat(80);
+        let mut input = line.as_bytes().to_vec();
+        input.push(b'B');
+        let screen = feed_bytes(24, 80, &input);
+        // Both the full line and the wrapped char should be present
+        assert!(screen.contains(&"A".repeat(80)), "got: {screen}");
+        assert!(screen.contains("B"), "wrap char missing: {screen}");
+    }
+
+    #[test]
+    fn ansi_alternate_screen() {
+        // Switch to alternate screen, write, switch back — original content restored
+        let screen = feed_bytes(
+            24,
+            80,
+            b"Main\x1b[?1049hAlternate\x1b[?1049l",
+        );
+        assert!(screen.contains("Main"), "original lost: {screen}");
+        assert!(!screen.contains("Alternate"), "alt leaked: {screen}");
+    }
+
+    #[test]
+    fn ansi_scroll_region() {
+        // Set scroll region to lines 2-4, then scroll within it
+        let mut input = Vec::new();
+        input.extend_from_slice(b"\x1b[1;1HLine1");
+        input.extend_from_slice(b"\x1b[2;1HLine2");
+        input.extend_from_slice(b"\x1b[3;1HLine3");
+        input.extend_from_slice(b"\x1b[4;1HLine4");
+        input.extend_from_slice(b"\x1b[5;1HLine5");
+        // Set scroll region to rows 2-4
+        input.extend_from_slice(b"\x1b[2;4r");
+        // Move to row 4 and issue newline (scrolls region)
+        input.extend_from_slice(b"\x1b[4;1H\n");
+        input.extend_from_slice(b"New");
+        let screen = feed_bytes(10, 80, &input);
+        // Line1 should be untouched (above region)
+        assert!(screen.contains("Line1"), "got: {screen}");
+        // Line5 should be untouched (below region)
+        assert!(screen.contains("Line5"), "got: {screen}");
+    }
+
+    #[test]
+    fn ansi_large_burst() {
+        // Simulate a large output burst (like `ls -la` on a big directory)
+        let mut input = Vec::new();
+        for i in 0..500 {
+            input.extend_from_slice(format!("file_{i:04}.txt\r\n").as_bytes());
+        }
+        let screen = feed_bytes(24, 80, &input);
+        // Last lines should be visible (scrolled up)
+        assert!(screen.contains("file_0499.txt"), "got tail: {screen}");
+    }
+
+    // ── resize-parser sync tests ─────────────────────────────────────
+
+    #[test]
+    fn resize_updates_parser_screen_size() {
+        let mut pane = mock_pane("a1", false);
+        // Initial size from mock_pane is (24, 80)
+        assert_eq!(pane.parser.read().unwrap().screen().size(), (24, 80));
+        // Resize to something different
+        pane.resize_to_inner(Rect::new(0, 0, 120, 40));
+        assert_eq!(pane.parser.read().unwrap().screen().size(), (40, 120));
+    }
+
+    #[test]
+    fn resize_preserves_existing_content() {
+        let mut pane = mock_pane("a1", false);
+        // Feed some content
+        pane.parser.write().unwrap().process(b"Hello from pane");
+        // Resize
+        pane.resize_to_inner(Rect::new(0, 0, 60, 20));
+        // Content should survive
+        let screen = pane.parser.read().unwrap().screen().contents();
+        assert!(screen.contains("Hello from pane"), "got: {screen}");
+    }
+
+    #[test]
+    fn resize_then_feed_uses_new_dimensions() {
+        let mut pane = mock_pane("a1", false);
+        // Resize to narrow terminal
+        pane.resize_to_inner(Rect::new(0, 0, 20, 10));
+        // Feed a long line — should wrap at col 20
+        let long = "X".repeat(25);
+        pane.parser.write().unwrap().process(long.as_bytes());
+        let screen = pane.parser.read().unwrap().screen().contents();
+        // All 25 chars should be present (wrapped across lines)
+        let x_count = screen.chars().filter(|&c| c == 'X').count();
+        assert_eq!(x_count, 25, "got {x_count} X's in: {screen}");
+    }
+
+    // ── integration: real PTY tests ──────────────────────────────────
+
+    #[test]
+    #[ignore] // requires real PTY — run with: cargo test -- --ignored
+    fn pty_spawn_echo_roundtrip() {
+        let pane = PtyPane::new(
+            24,
+            80,
+            "echo",
+            &["hello".into()],
+            Path::new("/tmp"),
+            "test-1".into(),
+            None,
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!pane.is_alive());
+        let parser = pane.parser.read().unwrap();
+        let contents = parser.screen().contents();
+        assert!(contents.contains("hello"), "got: {contents}");
+    }
+
+    #[test]
+    #[ignore]
+    fn pty_writer_under_pressure() {
+        // Spawn `cat` which reads stdin and echoes to stdout simultaneously.
+        // This is the scenario that deadlocks with async writers (vim, etc).
+        // Send a burst of data and verify it all arrives without hanging.
+        let pane = PtyPane::new(
+            24,
+            80,
+            "cat",
+            &[],
+            Path::new("/tmp"),
+            "pressure-1".into(),
+            None,
+        )
+        .unwrap();
+
+        // Send 1000 lines through the writer thread
+        for i in 0..1000 {
+            let line = format!("line {i}\r");
+            let _ = pane.sender.send(line.into_bytes());
+        }
+
+        // Wait for output to arrive (with timeout — deadlock = test hangs)
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut saw_last = false;
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            if let Ok(parser) = pane.parser.read() {
+                let contents = parser.screen().contents();
+                if contents.contains("line 999") {
+                    saw_last = true;
+                    break;
+                }
+            }
+        }
+        assert!(saw_last, "timed out — possible deadlock");
+    }
+
+    #[test]
+    #[ignore]
+    fn pty_resize_updates_child_stty() {
+        // Spawn bash, resize the PTY, then ask `stty size` to confirm
+        // the child process sees the new dimensions.
+        let pane = PtyPane::new(
+            24,
+            80,
+            "bash",
+            &["--norc".into(), "--noprofile".into()],
+            Path::new("/tmp"),
+            "resize-1".into(),
+            None,
+        )
+        .unwrap();
+
+        std::thread::sleep(Duration::from_millis(300));
+
+        // Resize to 40x120
+        set_terminal_size(pane.master_fd, 40, 120);
+
+        // Small delay for terminal to process the SIGWINCH
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Ask stty for the size
+        let _ = pane.sender.send(b"stty size\r".to_vec());
+        std::thread::sleep(Duration::from_millis(500));
+
+        let contents = pane.parser.read().unwrap().screen().contents();
+        assert!(
+            contents.contains("40 120"),
+            "child didn't see resize, got: {contents}",
+        );
     }
 }
