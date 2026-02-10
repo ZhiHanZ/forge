@@ -17,6 +17,13 @@ use crate::config::RoleSpec;
 use crate::features::{FeatureList, StatusCounts};
 use crate::runner::{self, RunConfig};
 
+/// Mark an FD as close-on-exec so it doesn't leak to child processes.
+fn set_cloexec(fd: RawFd) {
+    unsafe {
+        libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+    }
+}
+
 /// Set terminal size on a PTY master FD via ioctl(TIOCSWINSZ).
 fn set_terminal_size(fd: RawFd, rows: u16, cols: u16) {
     let winsize = libc::winsize {
@@ -60,6 +67,9 @@ impl PtyPane {
         // Set initial terminal size
         set_terminal_size(master_fd, rows, cols);
 
+        // Mark master as close-on-exec so it doesn't leak to other children
+        set_cloexec(master_fd);
+
         // Dup master FD for reader and writer threads (each owns its dup)
         let reader_fd = unsafe { libc::dup(master_fd) };
         if reader_fd < 0 {
@@ -69,6 +79,8 @@ impl PtyPane {
             }
             return Err(io::Error::last_os_error());
         }
+        set_cloexec(reader_fd);
+
         let writer_fd = unsafe { libc::dup(master_fd) };
         if writer_fd < 0 {
             unsafe {
@@ -78,6 +90,7 @@ impl PtyPane {
             }
             return Err(io::Error::last_os_error());
         }
+        set_cloexec(writer_fd);
 
         // Spawn child process with PTY slave as controlling terminal
         let mut command = std::process::Command::new(cmd);
