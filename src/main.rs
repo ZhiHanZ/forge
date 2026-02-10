@@ -1,5 +1,6 @@
 mod config;
 mod context;
+mod export;
 mod features;
 mod git;
 mod init;
@@ -68,6 +69,18 @@ enum Commands {
         #[arg(short, long, default_value_t = 50)]
         tail: usize,
     },
+    /// Export project data for analysis
+    Export {
+        /// Output directory (default: .forge/export/)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Skip Claude Code JSONL transcripts
+        #[arg(long)]
+        no_transcripts: bool,
+        /// Git commits to include (default: 100)
+        #[arg(long, default_value_t = 100)]
+        git_commits: usize,
+    },
 }
 
 fn main() {
@@ -87,6 +100,11 @@ fn main() {
         Commands::Status => cmd_status(&cli.project),
         Commands::Stop => cmd_stop(&cli.project),
         Commands::Logs { agent, tail } => cmd_logs(&cli.project, &agent, tail),
+        Commands::Export {
+            output,
+            no_transcripts,
+            git_commits,
+        } => cmd_export(&cli.project, output, no_transcripts, git_commits),
     }
 }
 
@@ -330,6 +348,49 @@ fn cmd_logs(project_dir: &PathBuf, agent: &str, tail: usize) {
         }
         Err(e) => {
             eprintln!("Error reading log: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_export(
+    project_dir: &PathBuf,
+    output: Option<PathBuf>,
+    no_transcripts: bool,
+    git_commits: usize,
+) {
+    let output_dir = output.unwrap_or_else(|| project_dir.join(".forge/export"));
+    let include_transcripts = !no_transcripts;
+
+    match export::export_project(project_dir, &output_dir, include_transcripts, git_commits) {
+        Ok(manifest) => {
+            println!("Exported to {}", output_dir.display());
+            println!();
+            println!("Sections: {}", manifest.sections.join(", "));
+            println!(
+                "Features: {} total ({} done, {} pending)",
+                manifest.features.total, manifest.features.done, manifest.features.pending
+            );
+            if let Some(git) = &manifest.git {
+                println!(
+                    "Git: {} commits, branch {}, latest {}",
+                    git.commits_included, git.branch, git.latest_commit
+                );
+            }
+            if !manifest.transcripts.is_empty() {
+                let total_bytes: u64 =
+                    manifest.transcripts.iter().map(|t| t.size_bytes).sum();
+                println!(
+                    "Transcripts: {} sessions ({:.1} MB)",
+                    manifest.transcripts.len(),
+                    total_bytes as f64 / 1_048_576.0
+                );
+            }
+            println!();
+            println!("Manifest: {}", output_dir.join("manifest.json").display());
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
             std::process::exit(1);
         }
     }
