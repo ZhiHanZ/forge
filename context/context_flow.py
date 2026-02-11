@@ -455,22 +455,44 @@ def compile_package(
     # Scope files
     lines.extend(_render_scope_files(feature, file_infos, config))
 
-    # Context hints
+    # Context hints — summary + pointer (not full inline)
     hints = feature.get("context_hints", [])
     if hints:
-        lines.append("\n## Relevant Context")
+        linked = []
         for hint in hints:
             hint_path = CONTEXT_DIR / f"{hint}.md"
             if hint_path.exists():
                 content = hint_path.read_text().strip()
-                lines.append(f"\n### {hint}")
-                lines.append(content)
+                if content:
+                    summary = _summarize_md(content, max_lines=3)
+                    linked.append(f"- **{hint}**: {summary}")
+        if linked:
+            lines.append("\n## Relevant Context")
+            lines.extend(linked)
+            paths = [f"`context/{h}.md`" for h in hints
+                     if (CONTEXT_DIR / f"{h}.md").exists()]
+            if paths:
+                lines.append(f"\n> **Full details**: {', '.join(paths)}")
 
-    # Knowledge entries
-    knowledge = _load_knowledge_entries()
-    if knowledge:
-        lines.append("\n## Project Knowledge")
-        lines.append(knowledge)
+    # Gotchas — always worth knowing (short warnings, <50 lines each)
+    gotchas_dir = CONTEXT_DIR / "gotchas"
+    if gotchas_dir.is_dir():
+        gotcha_lines = []
+        for md_file in sorted(gotchas_dir.glob("*.md")):
+            if md_file.name == "INDEX.md":
+                continue
+            content = md_file.read_text().strip()
+            if content:
+                summary = _summarize_md(content, max_lines=2)
+                gotcha_lines.append(f"- **{md_file.stem}**: {summary}")
+        if gotcha_lines:
+            lines.append("\n## Gotchas")
+            lines.extend(gotcha_lines)
+
+    # Point to INDEX.md for broader context (not inlined)
+    index_path = CONTEXT_DIR / "INDEX.md"
+    if index_path.exists():
+        lines.append("\n> **More context**: Scan `context/INDEX.md` for decisions, patterns, references")
 
     # Execution memory
     exec_mem = _load_exec_memory(feature["id"])
