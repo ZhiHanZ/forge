@@ -261,8 +261,24 @@ def _render_scope_files(
     return lines
 
 
-def _load_scope_context(scope: str) -> list[str]:
-    """Load context entries (decisions, gotchas, patterns) related to a scope."""
+def _summarize_md(content: str, max_lines: int = 5) -> str:
+    """Extract first max_lines non-empty lines as a summary."""
+    out = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        out.append(stripped)
+        if len(out) >= max_lines:
+            break
+    return "\n".join(out)
+
+
+def _load_scope_context(scope: str, summarize: bool = False) -> list[str]:
+    """Load context entries (decisions, gotchas, patterns) related to a scope.
+
+    If summarize=True, include only first few lines + pointer to full file.
+    """
     lines: list[str] = []
     categories = ["decisions", "gotchas", "patterns"]
     for cat in categories:
@@ -275,8 +291,12 @@ def _load_scope_context(scope: str) -> list[str]:
             if scope.lower().replace("-", "") in md_file.stem.lower().replace("-", ""):
                 content = md_file.read_text().strip()
                 if content:
-                    lines.append(f"\n### {cat}/{md_file.stem}")
-                    lines.append(content)
+                    if summarize:
+                        summary = _summarize_md(content)
+                        lines.append(f"- **{cat}/{md_file.stem}**: {summary}")
+                    else:
+                        lines.append(f"\n### {cat}/{md_file.stem}")
+                        lines.append(content)
     return lines
 
 
@@ -304,13 +324,15 @@ def compile_completed_package(
 
     lines.extend(_render_scope_files(feature, file_infos, config))
 
+    # Decisions & Patterns — summary only, point to full files
     scope = feature.get("scope", "")
     if scope:
-        scope_context = _load_scope_context(scope)
+        scope_context = _load_scope_context(scope, summarize=True)
         if scope_context:
             lines.append("\n## Decisions & Patterns")
             lines.extend(scope_context)
 
+    # Linked Context — summary + pointer, not full inline
     hints = feature.get("context_hints", [])
     if hints:
         linked = []
@@ -319,19 +341,27 @@ def compile_completed_package(
             if hint_path.exists():
                 content = hint_path.read_text().strip()
                 if content:
-                    linked.append(f"\n### {hint}")
-                    linked.append(content)
+                    summary = _summarize_md(content, max_lines=3)
+                    linked.append(f"- **{hint}**: {summary}")
         if linked:
             lines.append("\n## Linked Context")
             lines.extend(linked)
+            paths = [f"`context/{h}.md`" for h in hints
+                     if (CONTEXT_DIR / f"{h}.md").exists()]
+            if paths:
+                lines.append(f"\n> **Full details**: {', '.join(paths)}")
 
+    # POC Results — summary + pointer
     poc_path = CONTEXT_DIR / "poc" / f"{feature['id']}.md"
     if poc_path.exists():
         content = poc_path.read_text().strip()
         if content:
+            summary = _summarize_md(content, max_lines=5)
             lines.append("\n## POC Results")
-            lines.append(content)
+            lines.append(summary)
+            lines.append(f"\n> **Full POC**: `context/poc/{feature['id']}.md`")
 
+    # Session tactics — compact, always inline
     exec_mem = _load_exec_memory(feature["id"])
     if exec_mem:
         lines.append(f"\n{exec_mem}")
