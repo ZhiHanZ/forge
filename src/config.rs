@@ -118,6 +118,7 @@ pub struct Principles {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Scope {
+    #[serde(default)]
     pub owns: Vec<String>,
     #[serde(default)]
     pub api: String,
