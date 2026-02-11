@@ -194,8 +194,11 @@ def _extract_file_info_llm(file_content: str, file_path: str) -> FileMapInfo:
                 "role": "system",
                 "content": (
                     "Extract public API information from this source file. "
-                    "Include function signatures, public types, key imports, "
-                    "and a one-line summary. Be precise and concise."
+                    "Include function signatures (mark entry points like main, handlers, "
+                    "tests, decorated functions), public types with their kind "
+                    "(struct/enum/trait/class/interface), key imports, and a brief summary. "
+                    "If there are interesting call relationships or type hierarchies, "
+                    "include a mermaid graph. Be precise and concise."
                 ),
             },
             {
@@ -238,13 +241,20 @@ def _render_scope_files(
             if info.public_functions:
                 lines.append("\n**Functions:**")
                 for fn in info.public_functions:
-                    lines.append(f"- `{fn.signature}` — {fn.summary}")
+                    entry = f"- `{fn.signature}` — {fn.summary}"
+                    if fn.is_entry_point:
+                        entry += " *(entry point)*"
+                    lines.append(entry)
             if info.public_types:
                 lines.append("\n**Types:**")
                 for t in info.public_types:
-                    lines.append(f"- `{t.name}` — {t.summary}")
+                    kind = f" ({t.kind})" if t.kind else ""
+                    lines.append(f"- `{t.name}`{kind} — {t.summary}")
             if info.key_imports:
                 lines.append(f"\n**Key imports:** {', '.join(info.key_imports)}")
+            if info.mermaid_graphs:
+                for graph in info.mermaid_graphs:
+                    lines.append(f"\n```mermaid\n{graph}\n```")
         else:
             lines.append(f"\n### {sf}")
             lines.append("_(not yet analyzed)_")
