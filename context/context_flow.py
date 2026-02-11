@@ -4,20 +4,32 @@ This flow extracts file-level metadata (function signatures, types, imports)
 from source files, then assembles per-feature context packages that agents
 read instead of re-scanning the codebase each session.
 
-Usage:
-    cocoindex update context/context_flow.py
+Usage (with CocoIndex):
+    cocoindex update .forge/context_flow.py
+
+Usage (standalone, no memoization):
+    python .forge/context_flow.py
 
 Environment variables:
-    FORGE_PROJECT_DIR  — project root (default: cwd)
-    COCOINDEX_DATABASE_URL — LMDB path for CocoIndex state
+    FORGE_PROJECT_DIR        — project root (default: cwd)
+    COCOINDEX_DATABASE_URL   — LMDB path for CocoIndex state
+    FORGE_EXTRACT_MODEL      — LLM model for file extraction (default: gpt-4o-mini)
 """
 
+import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 
-import cocoindex
+# CocoIndex is optional — works without it (no memoization).
+try:
+    import cocoindex
+    HAS_COCOINDEX = True
+except ImportError:
+    HAS_COCOINDEX = False
 
+sys.path.insert(0, str(Path(__file__).parent))
 from context_models import FileMapInfo
 
 # ---------------------------------------------------------------------------
@@ -165,16 +177,11 @@ def _get_scope_files(feature: dict, config: dict | None) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# CocoIndex components
+# LLM extraction (memoized when CocoIndex is available)
 # ---------------------------------------------------------------------------
 
-@cocoindex.op.function(memo=True)
-def extract_file_info(file_content: str, file_path: str) -> FileMapInfo:
-    """Extract function signatures, types, imports, and summary from a source file.
-
-    This uses LLM-based extraction with memoization — unchanged files
-    are not re-processed.
-    """
+def _extract_file_info_llm(file_content: str, file_path: str) -> FileMapInfo:
+    """Extract function signatures, types, imports, and summary from a source file."""
     import instructor
     import litellm
 
@@ -200,6 +207,17 @@ def extract_file_info(file_content: str, file_path: str) -> FileMapInfo:
     )
     return resp
 
+
+# Wrap with CocoIndex memoization if available
+if HAS_COCOINDEX:
+    extract_file_info = cocoindex.function(memo=True)(_extract_file_info_llm)
+else:
+    extract_file_info = _extract_file_info_llm
+
+
+# ---------------------------------------------------------------------------
+# Package compilation (pure Python, no LLM)
+# ---------------------------------------------------------------------------
 
 def _render_scope_files(
     feature: dict,
@@ -234,11 +252,7 @@ def _render_scope_files(
 
 
 def _load_scope_context(scope: str) -> list[str]:
-    """Load context entries (decisions, gotchas, patterns) related to a scope.
-
-    Matches by checking if the scope name or its slug appears in the entry
-    filename or content first line.
-    """
+    """Load context entries (decisions, gotchas, patterns) related to a scope."""
     lines: list[str] = []
     categories = ["decisions", "gotchas", "patterns"]
     for cat in categories:
@@ -248,7 +262,6 @@ def _load_scope_context(scope: str) -> list[str]:
         for md_file in sorted(cat_dir.glob("*.md")):
             if md_file.name == "INDEX.md":
                 continue
-            # Match by filename containing scope slug
             if scope.lower().replace("-", "") in md_file.stem.lower().replace("-", ""):
                 content = md_file.read_text().strip()
                 if content:
@@ -279,10 +292,8 @@ def compile_completed_package(
     lines.append(f"**Scope**: {feature.get('scope', 'unknown')}")
     lines.append("**Status**: done")
 
-    # Scope files — the API surface this feature built
     lines.extend(_render_scope_files(feature, file_infos, config))
 
-    # Context entries linked to this feature's scope
     scope = feature.get("scope", "")
     if scope:
         scope_context = _load_scope_context(scope)
@@ -290,7 +301,6 @@ def compile_completed_package(
             lines.append("\n## Decisions & Patterns")
             lines.extend(scope_context)
 
-    # Context hints that were specified for this feature
     hints = feature.get("context_hints", [])
     if hints:
         linked = []
@@ -305,7 +315,6 @@ def compile_completed_package(
             lines.append("\n## Linked Context")
             lines.extend(linked)
 
-    # POC results (if this was a POC feature)
     poc_path = CONTEXT_DIR / "poc" / f"{feature['id']}.md"
     if poc_path.exists():
         content = poc_path.read_text().strip()
@@ -313,7 +322,6 @@ def compile_completed_package(
             lines.append("\n## POC Results")
             lines.append(content)
 
-    # Discoveries from exec memory — useful for dependents to know
     exec_mem = _load_exec_memory(feature["id"])
     if exec_mem:
         lines.append(f"\n{exec_mem}")
@@ -329,18 +337,16 @@ def compile_package(
 ) -> str:
     """Assemble a context package markdown for a single feature.
 
-    This is a mechanical assembly step (no LLM) — it combines:
-    - Feature metadata
-    - Dependency interfaces (completed features this one depends on)
-    - Scope file maps (signatures, types)
-    - Relevant knowledge entries
-    - Execution memory (retry history)
+    Progressive disclosure for dependencies:
+    - Tier 1: Summary table (~1 token per dep)
+    - Tier 2: API surface — signatures + types only (~20 tokens per dep)
+    - Tier 3: Pointer to full package (agent reads on demand)
     """
     lines = [f"# Context Package: {feature['id']}"]
     lines.append(f"\n**Description**: {feature.get('description', '')}")
     lines.append(f"**Scope**: {feature.get('scope', 'unknown')}")
 
-    # Dependencies — progressive disclosure (summary → API → full package on demand)
+    # Dependencies — progressive disclosure
     depends_on = feature.get("depends_on", [])
     if depends_on and all_features:
         features_by_id = {f["id"]: f for f in all_features}
@@ -359,7 +365,7 @@ def compile_package(
         if done_deps or unmet:
             lines.append("\n## Dependencies")
 
-            # Tier 1: Summary table — always shown (~1 token per dep)
+            # Tier 1: Summary table
             lines.append("")
             lines.append("| Dep | Description | Scope | Status |")
             lines.append("|-----|-------------|-------|--------|")
@@ -375,7 +381,7 @@ def compile_package(
                     f"| {dep.get('scope', '?')} | **pending** |"
                 )
 
-            # Tier 2: API surface per done dep — signatures + types only (~20 tokens each)
+            # Tier 2: API surface per done dep
             for dep in done_deps:
                 scope_files = _get_scope_files(dep, config)
                 if not scope_files:
@@ -394,7 +400,7 @@ def compile_package(
                             for t in info.public_types:
                                 lines.append(f"- `{t.name}` — {t.summary}")
 
-            # Tier 3: Pointer to full packages — agent reads on demand
+            # Tier 3: Pointer to full packages
             full_paths = []
             for dep in done_deps:
                 dep_pkg_path = PACKAGES_DIR / f"{dep['id']}.md"
@@ -434,27 +440,14 @@ def compile_package(
     return "\n".join(lines) + "\n"
 
 
-@cocoindex.op.function(memo=True)
 def process_feature(
-    feature_json: str,
-    file_infos_json: str,
-    config_json: str,
-    all_features_json: str,
+    feature: dict,
+    file_infos: dict[str, FileMapInfo],
+    config: dict | None,
+    all_features: list[dict] | None = None,
     is_completed: bool = False,
 ) -> str:
-    """Process a single feature and produce its context package.
-
-    Memoized: only re-runs when the feature, file infos, or config change.
-    For completed features, produces a lightweight API contract.
-    For pending features, includes dependency interfaces.
-    """
-    feature = json.loads(feature_json)
-    file_infos_raw = json.loads(file_infos_json)
-    config = json.loads(config_json) if config_json else None
-    all_features = json.loads(all_features_json) if all_features_json else None
-
-    file_infos = {k: FileMapInfo(**v) for k, v in file_infos_raw.items()}
-
+    """Process a single feature and produce its context package."""
     if is_completed:
         return compile_completed_package(feature, file_infos, config)
     return compile_package(feature, file_infos, config, all_features)
@@ -504,30 +497,30 @@ def app_main():
     # Load config
     config = _load_forge_config()
 
-    # Collect and extract source file info
+    # Collect and extract source file info (LLM-based, skipped if no API key)
     source_files = _collect_source_files()
     file_infos: dict[str, FileMapInfo] = {}
 
-    for rel_path in source_files:
-        abs_path = PROJECT_DIR / rel_path
-        try:
-            content = abs_path.read_text()
-        except Exception:
-            continue
-        info = extract_file_info(content, str(rel_path))
-        file_infos[str(rel_path)] = info
-
-    # Serialize for memoization
-    file_infos_json = json.dumps({k: v.model_dump() for k, v in file_infos.items()})
-    config_json = json.dumps(config) if config else ""
-    all_features_json = json.dumps(features)
+    has_llm = bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY"))
+    if has_llm:
+        for rel_path in source_files:
+            abs_path = PROJECT_DIR / rel_path
+            try:
+                content = abs_path.read_text()
+            except Exception:
+                continue
+            try:
+                info = extract_file_info(content, str(rel_path))
+                file_infos[str(rel_path)] = info
+            except Exception as e:
+                print(f"  Skipping {rel_path}: {e}")
+    else:
+        print("  No LLM API key — skipping file extraction (packages will lack scope file maps)")
 
     # Pass 1: compile completed packages (API contracts for dependents)
     for feature in done_features:
-        feature_json = json.dumps(feature)
         package_md = process_feature(
-            feature_json, file_infos_json, config_json,
-            all_features_json, is_completed=True,
+            feature, file_infos, config, features, is_completed=True,
         )
         out_path = PACKAGES_DIR / f"{feature['id']}.md"
         out_path.write_text(package_md)
@@ -535,10 +528,8 @@ def app_main():
 
     # Pass 2: compile pending packages (includes dependency interfaces)
     for feature in pending_features:
-        feature_json = json.dumps(feature)
         package_md = process_feature(
-            feature_json, file_infos_json, config_json,
-            all_features_json, is_completed=False,
+            feature, file_infos, config, features, is_completed=False,
         )
         out_path = PACKAGES_DIR / f"{feature['id']}.md"
         out_path.write_text(package_md)
