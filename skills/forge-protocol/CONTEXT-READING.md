@@ -59,6 +59,8 @@ If `context/packages/{your_feature_id}.md` exists, **read it first**. It contain
 - **Scope file maps**: function signatures, public types, key imports for files you'll touch
 - **Relevant context**: decisions, gotchas, patterns filtered for your feature
 - **Previous attempt history**: what earlier agents tried and why they failed
+- **Session tactics**: approach, test strategy, insights, and performance notes from the implementing agent
+- **Dependency interfaces**: completed features this one depends on (API surface, decisions, tactics)
 
 Context packages are pre-compiled by CocoIndex and refreshed before each session. They save
 ~5,000-20,000 tokens of codebase scanning. If a package exists, you can skip scanning
@@ -68,21 +70,12 @@ Context packages are pre-compiled by CocoIndex and refreshed before each session
 
 ## Execution Memory
 
-When your session ends (success or failure), write `feedback/exec-memory/{your_feature_id}.json`
-with an `attempts` array documenting what you tried:
+When your session ends (success or failure), write `feedback/exec-memory/{your_feature_id}.json`.
+This captures both retry history and session tactics. See [CONTEXT-WRITING.md](CONTEXT-WRITING.md#execution-memory) for the full schema.
 
-```json
-{
-  "feature_id": "f001",
-  "attempts": [
-    {
-      "number": 1,
-      "summary": "Implemented parser using nom combinators",
-      "failed_reason": "verify script failed: missing edge case for empty input",
-      "discoveries": ["nom::bytes::complete::tag panics on empty slice"]
-    }
-  ]
-}
-```
+Key fields:
+- `attempts` — what you tried, what failed, what you discovered
+- `tactics` — your approach, test strategy, which context you used, insights, perf notes
 
-This helps future agents (and context packages) avoid repeating failed approaches.
+This feeds into completed feature packages — downstream features get your tactics
+as part of their dependency interface, not just your code.

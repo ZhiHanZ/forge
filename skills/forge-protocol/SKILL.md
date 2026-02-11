@@ -73,8 +73,16 @@ The verify script checks this file exists. A POC is done when:
 
 1. Write discoveries to `context/{decisions,gotchas,patterns}/` (see [CONTEXT-WRITING.md](CONTEXT-WRITING.md))
 2. External knowledge → `context/references/`
-3. Commit all with descriptive message
-4. Push. Exit.
+3. Write execution memory with **tactics** to `feedback/exec-memory/{feature_id}.json`:
+   - `attempts` — what you tried, what failed, what you discovered
+   - `tactics` — which context you used, your approach, test strategy, insights, perf notes
+   - See [CONTEXT-WRITING.md](CONTEXT-WRITING.md#execution-memory) for full schema
+4. Commit all with descriptive message
+5. Push. Exit.
+
+Your context entries, tactics, and execution memory become part of the completed
+feature's package — downstream features (via `depends_on`) receive your API surface,
+decisions, approach, and test strategy automatically.
 
 ## Hard rules
 

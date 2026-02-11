@@ -209,13 +209,15 @@ pub fn run_single_agent(config: &RunConfig) -> RunOutcome {
 
         // --- Phase 4: Orchestrating review ---
         println!("  Dispatching orchestrating review...");
-        let orch_prompt =
+        let orch_prompt = format!(
             "You are a forge orchestrating agent. Follow the forge-orchestrating skill. \
              Review the last executor session: read feedback/last-verify.json, run git diff HEAD~1, \
-             check code against principles. Write feedback/session-review.md and any context entries. \
-             Then commit and exit.";
+             check code against principles. Review feedback/exec-memory/{next}.json for session \
+             tactics — assess approach, test strategy, and insights quality. \
+             Write feedback/session-review.md and any context entries. Then commit and exit."
+        );
 
-        match spawn_agent(&config.orchestrating, &config.project_dir, orch_prompt, "orchestrator") {
+        match spawn_agent(&config.orchestrating, &config.project_dir, &orch_prompt, "orchestrator") {
             Ok(mut child) => {
                 // Capture but don't print orchestrator output (it's housekeeping)
                 if let Some(stdout) = child.stdout.take() {
@@ -452,16 +454,19 @@ pub fn run_multi_agent(config: &RunConfig) -> RunOutcome {
 
         // --- Orchestrating review ---
         println!("  Dispatching orchestrating review...");
-        let orch_prompt =
+        let fids_str = feature_ids.join(", ");
+        let orch_prompt = format!(
             "You are a forge orchestrating agent. Follow the forge-orchestrating skill. \
              Review the last executor session: read feedback/last-verify.json, run git diff HEAD~1, \
-             check code against principles. Write feedback/session-review.md and any context entries. \
-             Then commit and exit.";
+             check code against principles. Review feedback/exec-memory/ for session tactics of \
+             features [{fids_str}] — assess approach, test strategy, and insights quality. \
+             Write feedback/session-review.md and any context entries. Then commit and exit."
+        );
 
         match spawn_agent(
             &config.orchestrating,
             &config.project_dir,
-            orch_prompt,
+            &orch_prompt,
             "orchestrator",
         ) {
             Ok(mut child) => {

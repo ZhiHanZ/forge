@@ -64,7 +64,28 @@ Flag specific violations:
 - Cross-scope imports only through API?
 - No direct access to another scope's internals?
 
-## Phase 4: Check POC outcomes
+## Phase 4: Review session tactics
+
+Read `feedback/exec-memory/{feature_id}.json` — the executor's tactical record.
+
+### Check completeness
+- `tactics` section present? If missing, flag in feedback: "No tactics written — next agent has no strategic context."
+- `approach` filled in? Agent should explain *how* it solved the problem, not just what it did.
+- `test_strategy` filled in? Should describe why the tests provide confidence.
+- `insights` non-empty? If the agent learned nothing, it either didn't document or the feature was trivial.
+
+### Check quality
+- **Approach**: Does it match what the diff shows? Flag contradictions.
+- **Test strategy**: Does it align with the P2 review? If tests are weak but agent claims "comprehensive tests", flag the gap.
+- **Insights**: Are they actionable? "It was hard" is not useful. "nom alt() silently backtracks on partial match" is.
+- **Context used**: Did the agent actually use context, or did it ignore available entries and struggle?
+
+### Assess for downstream value
+- If this feature is in other features' `depends_on`, its tactics become part of the dependency interface.
+- Flag if the approach or insights would mislead downstream agents.
+- If tactics reveal a pattern worth generalizing, write it in Phase 5.
+
+## Phase 4b: Check POC outcomes
 
 Read `context/poc/` for any new entries:
 - POC passed → note in feedback, mention which unknowns are resolved
@@ -131,6 +152,10 @@ Write `feedback/session-review.md`:
 - P2 Proof: WARN — f002 tests missing edge case for empty input
 - P3 Style: OK
 - P4 Boundaries: OK
+
+### Tactics Assessment
+- f001: approach sound, insights useful for downstream (f002 depends on f001)
+- f002: WARN — no tactics written, test strategy claims "comprehensive" but P2 found gaps
 
 ### POC Status
 - p001: pass — nom handles thrift IDL (see context/poc/p001.md)

@@ -9,7 +9,7 @@ Usage:
 
 Environment variables:
     FORGE_PROJECT_DIR  — project root (default: cwd)
-    COCOINDEX_DB       — database URL for CocoIndex state
+    COCOINDEX_DATABASE_URL — LMDB path for CocoIndex state
 """
 
 import json
@@ -86,26 +86,54 @@ def _load_knowledge_entries() -> str:
 
 
 def _load_exec_memory(feature_id: str) -> str:
-    """Load execution memory for a feature (previous attempt history)."""
+    """Load execution memory for a feature (attempts + tactics)."""
     mem_path = EXEC_MEMORY_DIR / f"{feature_id}.json"
     data = _load_json(mem_path)
     if not data or not isinstance(data, dict):
         return ""
+
+    lines: list[str] = []
+
+    # Attempts history
     attempts = data.get("attempts", [])
-    if not attempts:
-        return ""
-    lines = ["## Previous Attempts"]
-    for a in attempts:
-        num = a.get("number", "?")
-        summary = a.get("summary", "")
-        reason = a.get("failed_reason", "")
-        lines.append(f"- Attempt {num}: {summary}")
-        if reason:
-            lines.append(f"  Failed: {reason}")
-        discoveries = a.get("discoveries", [])
-        for d in discoveries:
-            lines.append(f"  - Discovered: {d}")
-    return "\n".join(lines)
+    if attempts:
+        lines.append("## Previous Attempts")
+        for a in attempts:
+            num = a.get("number", "?")
+            summary = a.get("summary", "")
+            reason = a.get("failed_reason", "")
+            lines.append(f"- Attempt {num}: {summary}")
+            if reason:
+                lines.append(f"  Failed: {reason}")
+            discoveries = a.get("discoveries", [])
+            for d in discoveries:
+                lines.append(f"  - Discovered: {d}")
+
+    # Session tactics — the reusable knowledge from implementation
+    tactics = data.get("tactics")
+    if tactics and isinstance(tactics, dict):
+        lines.append("\n## Session Tactics")
+        if tactics.get("approach"):
+            lines.append(f"**Approach**: {tactics['approach']}")
+        if tactics.get("test_strategy"):
+            lines.append(f"**Test strategy**: {tactics['test_strategy']}")
+        if tactics.get("verify_result"):
+            lines.append(f"**Verify result**: {tactics['verify_result']}")
+        if tactics.get("performance_notes"):
+            lines.append(f"**Performance**: {tactics['performance_notes']}")
+        context_used = tactics.get("context_used", [])
+        if context_used:
+            lines.append(f"**Context used**: {', '.join(context_used)}")
+        key_files = tactics.get("key_files_read", [])
+        if key_files:
+            lines.append(f"**Key files**: {', '.join(key_files)}")
+        insights = tactics.get("insights", [])
+        if insights:
+            lines.append("**Insights:**")
+            for i in insights:
+                lines.append(f"- {i}")
+
+    return "\n".join(lines) if lines else ""
 
 
 def _load_forge_config() -> dict | None:
@@ -173,15 +201,137 @@ def extract_file_info(file_content: str, file_path: str) -> FileMapInfo:
     return resp
 
 
+def _render_scope_files(
+    feature: dict,
+    file_infos: dict[str, FileMapInfo],
+    config: dict | None,
+) -> list[str]:
+    """Render scope file maps as markdown lines."""
+    lines: list[str] = []
+    scope_files = _get_scope_files(feature, config)
+    if not scope_files:
+        return lines
+    lines.append("\n## Scope Files")
+    for sf in scope_files:
+        info = file_infos.get(sf)
+        if info:
+            lines.append(f"\n### {info.name} ({info.lines} lines)")
+            lines.append(f"{info.summary}")
+            if info.public_functions:
+                lines.append("\n**Functions:**")
+                for fn in info.public_functions:
+                    lines.append(f"- `{fn.signature}` — {fn.summary}")
+            if info.public_types:
+                lines.append("\n**Types:**")
+                for t in info.public_types:
+                    lines.append(f"- `{t.name}` — {t.summary}")
+            if info.key_imports:
+                lines.append(f"\n**Key imports:** {', '.join(info.key_imports)}")
+        else:
+            lines.append(f"\n### {sf}")
+            lines.append("_(not yet analyzed)_")
+    return lines
+
+
+def _load_scope_context(scope: str) -> list[str]:
+    """Load context entries (decisions, gotchas, patterns) related to a scope.
+
+    Matches by checking if the scope name or its slug appears in the entry
+    filename or content first line.
+    """
+    lines: list[str] = []
+    categories = ["decisions", "gotchas", "patterns"]
+    for cat in categories:
+        cat_dir = CONTEXT_DIR / cat
+        if not cat_dir.is_dir():
+            continue
+        for md_file in sorted(cat_dir.glob("*.md")):
+            if md_file.name == "INDEX.md":
+                continue
+            # Match by filename containing scope slug
+            if scope.lower().replace("-", "") in md_file.stem.lower().replace("-", ""):
+                content = md_file.read_text().strip()
+                if content:
+                    lines.append(f"\n### {cat}/{md_file.stem}")
+                    lines.append(content)
+    return lines
+
+
+def compile_completed_package(
+    feature: dict,
+    file_infos: dict[str, FileMapInfo],
+    config: dict | None,
+) -> str:
+    """Assemble a completed-feature package — an API contract for dependents.
+
+    When a feature is done, its package becomes a reusable knowledge artifact:
+    - API surface: function signatures, types, imports from scope files
+    - Context links: decisions, gotchas, patterns created during implementation
+    - POC results: validation outcomes (if POC feature)
+    - Discoveries: what the implementing agent learned
+
+    This is useful for:
+    1. Downstream features in this project (via depends_on)
+    2. Other projects working on similar problems (portable knowledge)
+    """
+    lines = [f"# Completed: {feature['id']}"]
+    lines.append(f"\n**Description**: {feature.get('description', '')}")
+    lines.append(f"**Scope**: {feature.get('scope', 'unknown')}")
+    lines.append("**Status**: done")
+
+    # Scope files — the API surface this feature built
+    lines.extend(_render_scope_files(feature, file_infos, config))
+
+    # Context entries linked to this feature's scope
+    scope = feature.get("scope", "")
+    if scope:
+        scope_context = _load_scope_context(scope)
+        if scope_context:
+            lines.append("\n## Decisions & Patterns")
+            lines.extend(scope_context)
+
+    # Context hints that were specified for this feature
+    hints = feature.get("context_hints", [])
+    if hints:
+        linked = []
+        for hint in hints:
+            hint_path = CONTEXT_DIR / f"{hint}.md"
+            if hint_path.exists():
+                content = hint_path.read_text().strip()
+                if content:
+                    linked.append(f"\n### {hint}")
+                    linked.append(content)
+        if linked:
+            lines.append("\n## Linked Context")
+            lines.extend(linked)
+
+    # POC results (if this was a POC feature)
+    poc_path = CONTEXT_DIR / "poc" / f"{feature['id']}.md"
+    if poc_path.exists():
+        content = poc_path.read_text().strip()
+        if content:
+            lines.append("\n## POC Results")
+            lines.append(content)
+
+    # Discoveries from exec memory — useful for dependents to know
+    exec_mem = _load_exec_memory(feature["id"])
+    if exec_mem:
+        lines.append(f"\n{exec_mem}")
+
+    return "\n".join(lines) + "\n"
+
+
 def compile_package(
     feature: dict,
     file_infos: dict[str, FileMapInfo],
     config: dict | None,
+    all_features: list[dict] | None = None,
 ) -> str:
     """Assemble a context package markdown for a single feature.
 
     This is a mechanical assembly step (no LLM) — it combines:
     - Feature metadata
+    - Dependency interfaces (completed features this one depends on)
     - Scope file maps (signatures, types)
     - Relevant knowledge entries
     - Execution memory (retry history)
@@ -190,28 +340,74 @@ def compile_package(
     lines.append(f"\n**Description**: {feature.get('description', '')}")
     lines.append(f"**Scope**: {feature.get('scope', 'unknown')}")
 
+    # Dependencies — progressive disclosure (summary → API → full package on demand)
+    depends_on = feature.get("depends_on", [])
+    if depends_on and all_features:
+        features_by_id = {f["id"]: f for f in all_features}
+        done_deps = [
+            features_by_id[dep_id]
+            for dep_id in depends_on
+            if dep_id in features_by_id
+            and features_by_id[dep_id].get("status") == "done"
+        ]
+        unmet = [
+            dep_id for dep_id in depends_on
+            if dep_id in features_by_id
+            and features_by_id[dep_id].get("status") != "done"
+        ]
+
+        if done_deps or unmet:
+            lines.append("\n## Dependencies")
+
+            # Tier 1: Summary table — always shown (~1 token per dep)
+            lines.append("")
+            lines.append("| Dep | Description | Scope | Status |")
+            lines.append("|-----|-------------|-------|--------|")
+            for dep in done_deps:
+                lines.append(
+                    f"| {dep['id']} | {dep.get('description', '')} "
+                    f"| {dep.get('scope', '')} | done |"
+                )
+            for dep_id in unmet:
+                dep = features_by_id.get(dep_id, {})
+                lines.append(
+                    f"| {dep_id} | {dep.get('description', '?')} "
+                    f"| {dep.get('scope', '?')} | **pending** |"
+                )
+
+            # Tier 2: API surface per done dep — signatures + types only (~20 tokens each)
+            for dep in done_deps:
+                scope_files = _get_scope_files(dep, config)
+                if not scope_files:
+                    continue
+                has_api = False
+                for sf in scope_files:
+                    info = file_infos.get(sf)
+                    if info and (info.public_functions or info.public_types):
+                        if not has_api:
+                            lines.append(f"\n### {dep['id']} — API Surface")
+                            has_api = True
+                        if info.public_functions:
+                            for fn in info.public_functions:
+                                lines.append(f"- `{fn.signature}` — {fn.summary}")
+                        if info.public_types:
+                            for t in info.public_types:
+                                lines.append(f"- `{t.name}` — {t.summary}")
+
+            # Tier 3: Pointer to full packages — agent reads on demand
+            full_paths = []
+            for dep in done_deps:
+                dep_pkg_path = PACKAGES_DIR / f"{dep['id']}.md"
+                if dep_pkg_path.exists():
+                    full_paths.append(f"`context/packages/{dep['id']}.md`")
+            if full_paths:
+                lines.append(
+                    f"\n> **Deep dive**: For full tactics, decisions, and test strategy "
+                    f"read {', '.join(full_paths)}"
+                )
+
     # Scope files
-    scope_files = _get_scope_files(feature, config)
-    if scope_files:
-        lines.append("\n## Scope Files")
-        for sf in scope_files:
-            info = file_infos.get(sf)
-            if info:
-                lines.append(f"\n### {info.name} ({info.lines} lines)")
-                lines.append(f"{info.summary}")
-                if info.public_functions:
-                    lines.append("\n**Functions:**")
-                    for fn in info.public_functions:
-                        lines.append(f"- `{fn.signature}` — {fn.summary}")
-                if info.public_types:
-                    lines.append("\n**Types:**")
-                    for t in info.public_types:
-                        lines.append(f"- `{t.name}` — {t.summary}")
-                if info.key_imports:
-                    lines.append(f"\n**Key imports:** {', '.join(info.key_imports)}")
-            else:
-                lines.append(f"\n### {sf}")
-                lines.append("_(not yet analyzed)_")
+    lines.extend(_render_scope_files(feature, file_infos, config))
 
     # Context hints
     hints = feature.get("context_hints", [])
@@ -239,17 +435,29 @@ def compile_package(
 
 
 @cocoindex.op.function(memo=True)
-def process_feature(feature_json: str, file_infos_json: str, config_json: str) -> str:
+def process_feature(
+    feature_json: str,
+    file_infos_json: str,
+    config_json: str,
+    all_features_json: str,
+    is_completed: bool = False,
+) -> str:
     """Process a single feature and produce its context package.
 
     Memoized: only re-runs when the feature, file infos, or config change.
+    For completed features, produces a lightweight API contract.
+    For pending features, includes dependency interfaces.
     """
     feature = json.loads(feature_json)
     file_infos_raw = json.loads(file_infos_json)
     config = json.loads(config_json) if config_json else None
+    all_features = json.loads(all_features_json) if all_features_json else None
 
     file_infos = {k: FileMapInfo(**v) for k, v in file_infos_raw.items()}
-    return compile_package(feature, file_infos, config)
+
+    if is_completed:
+        return compile_completed_package(feature, file_infos, config)
+    return compile_package(feature, file_infos, config, all_features)
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +465,12 @@ def process_feature(feature_json: str, file_infos_json: str, config_json: str) -
 # ---------------------------------------------------------------------------
 
 def app_main():
-    """Main entry point: extract file info, compile per-feature packages."""
+    """Main entry point: extract file info, compile per-feature packages.
+
+    Two-pass approach:
+    1. Build completed packages for done features that are depended upon
+    2. Build pending packages that include their completed dependency interfaces
+    """
     PACKAGES_DIR.mkdir(parents=True, exist_ok=True)
     EXEC_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -269,13 +482,23 @@ def app_main():
 
     features = features_data if isinstance(features_data, list) else features_data.get("features", [])
 
-    # Filter to pending/claimed features only
     pending_features = [
         f for f in features
         if f.get("status") in ("pending", "claimed")
     ]
-    if not pending_features:
-        print("No pending features — nothing to package.")
+
+    # Find done features that are depended upon by any pending feature
+    pending_deps: set[str] = set()
+    for f in pending_features:
+        pending_deps.update(f.get("depends_on", []))
+
+    done_features = [
+        f for f in features
+        if f.get("status") == "done" and f.get("id") in pending_deps
+    ]
+
+    if not pending_features and not done_features:
+        print("No features to package.")
         return
 
     # Load config
@@ -297,12 +520,26 @@ def app_main():
     # Serialize for memoization
     file_infos_json = json.dumps({k: v.model_dump() for k, v in file_infos.items()})
     config_json = json.dumps(config) if config else ""
+    all_features_json = json.dumps(features)
 
-    # Compile packages
+    # Pass 1: compile completed packages (API contracts for dependents)
+    for feature in done_features:
+        feature_json = json.dumps(feature)
+        package_md = process_feature(
+            feature_json, file_infos_json, config_json,
+            all_features_json, is_completed=True,
+        )
+        out_path = PACKAGES_DIR / f"{feature['id']}.md"
+        out_path.write_text(package_md)
+        print(f"  Wrote {out_path.relative_to(PROJECT_DIR)} (completed)")
+
+    # Pass 2: compile pending packages (includes dependency interfaces)
     for feature in pending_features:
         feature_json = json.dumps(feature)
-        package_md = process_feature(feature_json, file_infos_json, config_json)
-
+        package_md = process_feature(
+            feature_json, file_infos_json, config_json,
+            all_features_json, is_completed=False,
+        )
         out_path = PACKAGES_DIR / f"{feature['id']}.md"
         out_path.write_text(package_md)
         print(f"  Wrote {out_path.relative_to(PROJECT_DIR)}")

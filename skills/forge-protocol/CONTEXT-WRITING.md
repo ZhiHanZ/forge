@@ -61,8 +61,8 @@ After exploring unfamiliar library code:
 ## Execution Memory
 
 At the end of each session, write `feedback/exec-memory/{your_feature_id}.json` to record
-what you attempted. This is consumed by context packages to help future agents avoid
-repeating failed approaches.
+what you attempted **and what you learned**. This is consumed by context packages so
+downstream features get your tactics, not just your code.
 
 **Schema:**
 
@@ -76,12 +76,25 @@ repeating failed approaches.
       "failed_reason": "Why it failed (empty string if succeeded)",
       "discoveries": ["List of things learned during this attempt"]
     }
-  ]
+  ],
+  "tactics": {
+    "context_used": ["context/decisions/use-vec.md", "context/references/memory-mgmt.md"],
+    "key_files_read": ["src/parser.rs", "src/model.rs"],
+    "approach": "How you solved it — the strategy, not the diff",
+    "test_strategy": "What tests you wrote and why they provide confidence",
+    "verify_result": "pass | fail",
+    "insights": ["Concrete things future agents should know"],
+    "performance_notes": "Benchmarks, memory usage, latency — if relevant"
+  }
 }
 ```
 
 **Rules:**
 - Always write this file, even on success (with empty `failed_reason`)
 - Append to the `attempts` array if the file already exists
-- Keep summaries concise (one sentence each)
-- `discoveries` should be actionable facts, not vague observations
+- Write `tactics` on the **final** attempt (success or blocked) — it captures the session outcome
+- `context_used` — list files you actually read and found useful (not everything you opened)
+- `approach` — one sentence: what strategy worked (or what you'd try next if blocked)
+- `test_strategy` — how you verified correctness, not just "ran tests"
+- `insights` — actionable facts that would save the next agent 10+ minutes
+- `performance_notes` — optional, only if you measured something
