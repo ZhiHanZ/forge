@@ -48,6 +48,7 @@ pub fn generate_claude_md(config: &ForgeConfig) -> String {
     lines.push("- `context/poc/` — POC outcomes (goal, result, learnings, design impact).".into());
     lines.push("- `context/references/` — external knowledge, read instead of re-searching.".into());
     lines.push("- `feedback/session-review.md` — last session's review (read first!).".into());
+    lines.push("- `context/packages/{feature_id}.md` — pre-compiled context for your feature (if available).".into());
     lines.push(String::new());
 
     lines.push("### Protocol".into());
@@ -118,13 +119,13 @@ mod tests {
     }
 
     #[test]
-    fn claude_md_under_45_lines() {
+    fn claude_md_under_50_lines() {
         let config = ForgeConfig::scaffold("test", "Rust");
         let md = generate_claude_md(&config);
         let line_count = md.lines().count();
         assert!(
-            line_count <= 45,
-            "CLAUDE.md is {line_count} lines, should be <= 45"
+            line_count <= 50,
+            "CLAUDE.md is {line_count} lines, should be <= 50"
         );
     }
 }

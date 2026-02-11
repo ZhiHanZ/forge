@@ -57,3 +57,31 @@ After exploring unfamiliar library code:
 1. Write `context/references/{library}-patterns.md`
 2. Include concrete code snippets showing API usage
 3. Link to source file/line for deep dives
+
+## Execution Memory
+
+At the end of each session, write `feedback/exec-memory/{your_feature_id}.json` to record
+what you attempted. This is consumed by context packages to help future agents avoid
+repeating failed approaches.
+
+**Schema:**
+
+```json
+{
+  "feature_id": "f001",
+  "attempts": [
+    {
+      "number": 1,
+      "summary": "Brief description of what was attempted",
+      "failed_reason": "Why it failed (empty string if succeeded)",
+      "discoveries": ["List of things learned during this attempt"]
+    }
+  ]
+}
+```
+
+**Rules:**
+- Always write this file, even on success (with empty `failed_reason`)
+- Append to the `attempts` array if the file already exists
+- Keep summaries concise (one sentence each)
+- `discoveries` should be actionable facts, not vague observations

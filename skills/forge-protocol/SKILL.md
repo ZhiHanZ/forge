@@ -18,7 +18,7 @@ rely entirely on the file system and git history.
 1. **Check location**: `pwd`, confirm working directory
 2. **Review history**: Read `feedback/session-review.md` (last session's review). Run `git log --oneline -n 5`
 3. **Review requirements**: Read `features.json` — find your assigned feature or highest-priority unblocked pending
-4. **Read context hints**: Your feature has a `context_hints` array listing exactly which context entries to read. Read each one (`context/{hint}.md`). These were chosen by the planner — they contain the patterns, decisions, and references you'll need.
+4. **Read context package**: If `context/packages/{your_feature_id}.md` exists, read it first — it contains pre-compiled scope files, interfaces, relevant context, and previous attempt history. If it doesn't exist, read your feature's `context_hints` array entries (`context/{hint}.md`).
 5. **Read feedback pointers**: If `feedback/session-review.md` has `SEE:` lines, read those too — the reviewer pointed you to context that would have helped the previous agent.
 6. **Fallback browsing**: If hints don't cover your needs, see [CONTEXT-READING.md](CONTEXT-READING.md) for how to scan INDEX.md and explore further.
 7. **Establish baseline**: Run the feature's verify script. If it already passes, pick next feature. If the main branch is broken, fix that FIRST.

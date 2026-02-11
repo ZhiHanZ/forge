@@ -63,6 +63,9 @@ pub fn run_single_agent(config: &RunConfig) -> RunOutcome {
     // Ensure runtime dir exists
     let _ = fs::create_dir_all(runtime_dir(&config.project_dir));
 
+    // Sync CocoIndex context flow files
+    crate::context_flow::sync_context_flow(&config.project_dir);
+
     loop {
         // Check for stop request
         if stop_requested(&config.project_dir) {
@@ -115,6 +118,13 @@ pub fn run_single_agent(config: &RunConfig) -> RunOutcome {
             }
         };
 
+        // Refresh CocoIndex context packages
+        match crate::context_flow::refresh_context(&config.project_dir) {
+            Ok(true) => println!("  Context packages refreshed."),
+            Ok(false) => {}
+            Err(e) => eprintln!("  Context refresh warning: {e}"),
+        }
+
         println!("--- Session {session} ---");
         println!("  Feature: {next}");
 
@@ -122,6 +132,7 @@ pub fn run_single_agent(config: &RunConfig) -> RunOutcome {
         let prompt = format!(
             "You are a forge agent. Your assigned feature is {next}. \
              Read features.json for details. Follow the forge-protocol skill. \
+             If context/packages/{next}.md exists, read it first for pre-compiled context. \
              When done, set status to done and exit.",
         );
 
@@ -237,6 +248,9 @@ pub fn run_multi_agent(config: &RunConfig) -> RunOutcome {
     let mut session = 0;
     let _ = fs::create_dir_all(runtime_dir(&config.project_dir));
 
+    // Sync CocoIndex context flow files
+    crate::context_flow::sync_context_flow(&config.project_dir);
+
     // Must be a git repo for worktrees
     if !git::is_git_repo(&config.project_dir) {
         eprintln!("Multi-agent mode requires a git repository.");
@@ -293,6 +307,13 @@ pub fn run_multi_agent(config: &RunConfig) -> RunOutcome {
             };
         }
 
+        // Refresh CocoIndex context packages
+        match crate::context_flow::refresh_context(&config.project_dir) {
+            Ok(true) => println!("  Context packages refreshed."),
+            Ok(false) => {}
+            Err(e) => eprintln!("  Context refresh warning: {e}"),
+        }
+
         let feature_ids: Vec<String> = claimable.iter().map(|f| f.id.clone()).collect();
 
         println!("--- Session {session} ({} agents) ---", feature_ids.len());
@@ -324,6 +345,7 @@ pub fn run_multi_agent(config: &RunConfig) -> RunOutcome {
             let prompt = format!(
                 "You are a forge agent. Your assigned feature is {feature_id}. \
                  Read features.json for details. Follow the forge-protocol skill. \
+                 If context/packages/{feature_id}.md exists, read it first for pre-compiled context. \
                  When done, set status to done and exit.",
             );
 

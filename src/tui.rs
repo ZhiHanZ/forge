@@ -273,6 +273,7 @@ fn open_next_feature_pane(
     let prompt = format!(
         "You are a forge agent. Your assigned feature is {feature_id}. \
          Read features.json for details. Follow the forge-protocol skill. \
+         If context/packages/{feature_id}.md exists, read it first for pre-compiled context. \
          When done, set status to done and exit.",
     );
 
@@ -507,6 +508,10 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
     let mut status_tick = 0u32;
     let mut command_mode = false;
 
+    // Sync CocoIndex context flow files and refresh packages
+    crate::context_flow::sync_context_flow(&config.project_dir);
+    let _ = crate::context_flow::refresh_context(&config.project_dir);
+
     // Open first pane with estimated inner size
     let (est_rows, est_cols) = estimate_inner(term_size.height, term_size.width, 1);
     open_next_feature_pane(&mut panes, &mut active_pane, est_rows, est_cols, config);
@@ -672,6 +677,7 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
         while i < panes.len() {
             if !panes[i].is_alive() {
                 panes.remove(i);
+                let _ = crate::context_flow::refresh_context(&config.project_dir);
                 // Try to spawn a replacement with the next claimable feature
                 let ts = terminal.size()?;
                 let nr = panes.len() as u16 + 1;

@@ -36,7 +36,9 @@ pub fn init_project(project_dir: &Path, description: &str) -> Result<(), InitErr
     let ctx = ContextManager::new(project_dir);
     ctx.init()?;
     std::fs::create_dir_all(project_dir.join("feedback"))?;
+    std::fs::create_dir_all(project_dir.join("feedback/exec-memory"))?;
     std::fs::create_dir_all(project_dir.join("scripts/verify"))?;
+    std::fs::create_dir_all(project_dir.join("context/packages"))?;
 
     // Generate CLAUDE.md and AGENTS.md
     let claude_md = template::generate_claude_md(&config);
@@ -52,9 +54,14 @@ pub fn init_project(project_dir: &Path, description: &str) -> Result<(), InitErr
     // Create references/ dir and add to .gitignore
     std::fs::create_dir_all(project_dir.join("references"))?;
     append_gitignore(project_dir, "references/")?;
+    append_gitignore(project_dir, "context/packages/")?;
+    append_gitignore(project_dir, ".forge/")?;
 
     // Install skills
     install_skills(project_dir)?;
+
+    // Sync CocoIndex context flow files (non-fatal)
+    crate::context_flow::sync_context_flow(project_dir);
 
     Ok(())
 }
@@ -66,6 +73,9 @@ pub fn install_project(project_dir: &Path) -> Result<(), InitError> {
     // Install/update skills
     install_skills(project_dir)?;
 
+    // Sync CocoIndex context flow files (non-fatal)
+    crate::context_flow::sync_context_flow(project_dir);
+
     // Regenerate CLAUDE.md and AGENTS.md from current config
     let claude_md = template::generate_claude_md(&config);
     std::fs::write(project_dir.join("CLAUDE.md"), &claude_md)?;
@@ -75,10 +85,14 @@ pub fn install_project(project_dir: &Path) -> Result<(), InitError> {
     let ctx = ContextManager::new(project_dir);
     ctx.init()?;
     std::fs::create_dir_all(project_dir.join("feedback"))?;
+    std::fs::create_dir_all(project_dir.join("feedback/exec-memory"))?;
     std::fs::create_dir_all(project_dir.join("scripts/verify"))?;
     std::fs::create_dir_all(project_dir.join(".forge"))?;
+    std::fs::create_dir_all(project_dir.join("context/packages"))?;
     std::fs::create_dir_all(project_dir.join("references"))?;
     append_gitignore(project_dir, "references/")?;
+    append_gitignore(project_dir, "context/packages/")?;
+    append_gitignore(project_dir, ".forge/")?;
 
     // Regenerate context INDEX.md
     ctx.write_index()?;

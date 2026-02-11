@@ -50,3 +50,39 @@ for related terms. Read matches only.
 ## Rule
 
 List directory contents first, read selectively. Never read all 50+ files when 5 are relevant.
+
+## Context Packages (fastest path)
+
+If `context/packages/{your_feature_id}.md` exists, **read it first**. It contains:
+
+- **Feature metadata**: description, scope, dependencies
+- **Scope file maps**: function signatures, public types, key imports for files you'll touch
+- **Relevant context**: decisions, gotchas, patterns filtered for your feature
+- **Previous attempt history**: what earlier agents tried and why they failed
+
+Context packages are pre-compiled by CocoIndex and refreshed before each session. They save
+~5,000-20,000 tokens of codebase scanning. If a package exists, you can skip scanning
+`context/INDEX.md` and individual context entries — the package already includes what's relevant.
+
+**Fallback**: If no package exists for your feature, follow the standard path above (INDEX.md → selective reads).
+
+## Execution Memory
+
+When your session ends (success or failure), write `feedback/exec-memory/{your_feature_id}.json`
+with an `attempts` array documenting what you tried:
+
+```json
+{
+  "feature_id": "f001",
+  "attempts": [
+    {
+      "number": 1,
+      "summary": "Implemented parser using nom combinators",
+      "failed_reason": "verify script failed: missing edge case for empty input",
+      "discoveries": ["nom::bytes::complete::tag panics on empty slice"]
+    }
+  ]
+}
+```
+
+This helps future agents (and context packages) avoid repeating failed approaches.
