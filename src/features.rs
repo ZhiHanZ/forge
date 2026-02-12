@@ -210,6 +210,41 @@ impl FeatureList {
         counts
     }
 
+    /// Find the next feature to work on after completing `completed_id`.
+    /// Prefers features whose depends_on includes `completed_id` (just-unblocked),
+    /// then falls back to global priority order.
+    pub fn next_after(&self, completed_id: &str) -> Option<&Feature> {
+        let done_ids: Vec<&str> = self
+            .features
+            .iter()
+            .filter(|f| f.status == FeatureStatus::Done)
+            .map(|f| f.id.as_str())
+            .collect();
+
+        let claimable = |f: &&Feature| -> bool {
+            f.status == FeatureStatus::Pending
+                && f.depends_on.iter().all(|dep| done_ids.contains(&dep.as_str()))
+        };
+
+        // First: features that directly depend on the completed feature
+        let unblocked = self
+            .features
+            .iter()
+            .filter(claimable)
+            .filter(|f| f.depends_on.iter().any(|dep| dep == completed_id))
+            .min_by_key(|f| f.priority);
+
+        if unblocked.is_some() {
+            return unblocked;
+        }
+
+        // Fallback: global priority order
+        self.features
+            .iter()
+            .filter(claimable)
+            .min_by_key(|f| f.priority)
+    }
+
     /// Check if all features are done.
     pub fn all_done(&self) -> bool {
         self.features.iter().all(|f| f.status == FeatureStatus::Done)
@@ -443,6 +478,79 @@ mod tests {
         let roundtrip: Feature = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtrip.feature_type, FeatureType::Poc);
         assert_eq!(roundtrip.context_hints, vec!["references/rpc-patterns"]);
+    }
+
+    #[test]
+    fn next_after_prefers_unblocked() {
+        let mut list = sample_features();
+        // Add an unrelated low-priority feature with no deps
+        list.features.push(Feature {
+            id: "f099".into(),
+            feature_type: FeatureType::Implement,
+            scope: "misc".into(),
+            description: "Unrelated low-pri feature".into(),
+            verify: "./scripts/verify/f099.sh".into(),
+            depends_on: vec![],
+            priority: 1, // Lower number = higher priority than f002(2)/f003(3)
+            status: FeatureStatus::Pending,
+            claimed_by: None,
+            blocked_reason: None,
+            context_hints: vec![],
+        });
+        // Complete f001
+        list.claim("f001", "agent-1").unwrap();
+        list.mark_done("f001").unwrap();
+
+        // next_after("f001") should prefer f002/f003 (depend on f001) over f099
+        let next = list.next_after("f001").unwrap();
+        assert!(
+            next.id == "f002" || next.id == "f003",
+            "expected f002 or f003 (depends on f001), got {}",
+            next.id,
+        );
+        // Specifically f002 because it has lower priority number (2 < 3)
+        assert_eq!(next.id, "f002");
+    }
+
+    #[test]
+    fn next_after_falls_back() {
+        let mut list = sample_features();
+        // Add an unrelated feature with no deps
+        list.features.push(Feature {
+            id: "f099".into(),
+            feature_type: FeatureType::Implement,
+            scope: "misc".into(),
+            description: "Unrelated feature".into(),
+            verify: "./scripts/verify/f099.sh".into(),
+            depends_on: vec![],
+            priority: 1,
+            status: FeatureStatus::Pending,
+            claimed_by: None,
+            blocked_reason: None,
+            context_hints: vec![],
+        });
+        // Complete f001, then claim f002 and f003 (the direct dependents)
+        list.claim("f001", "agent-1").unwrap();
+        list.mark_done("f001").unwrap();
+        list.claim("f002", "agent-2").unwrap();
+        list.mark_done("f002").unwrap();
+        list.claim("f003", "agent-3").unwrap();
+        list.mark_done("f003").unwrap();
+
+        // next_after("f003") — no features depend on f003, falls back to global
+        let next = list.next_after("f003").unwrap();
+        assert_eq!(next.id, "f099");
+    }
+
+    #[test]
+    fn next_after_handles_unknown_id() {
+        let mut list = sample_features();
+        list.claim("f001", "agent-1").unwrap();
+        list.mark_done("f001").unwrap();
+
+        // "f999" doesn't exist — should fall back to global priority
+        let next = list.next_after("f999").unwrap();
+        assert_eq!(next.id, "f002");
     }
 
     #[test]
