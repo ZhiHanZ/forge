@@ -458,8 +458,25 @@ fn render_feature_dag(features: &features::FeatureList) -> String {
     }
 
     let claimable_ids = features.claimable_ids();
+    let milestone_groups = features.milestone_claimable();
 
-    // Partition features into display groups, each sorted by priority
+    // Build a set of "next up" IDs: top 3 from milestone ordering
+    let mut next_up_ids: Vec<&str> = Vec::new();
+    for (_, ids) in &milestone_groups {
+        for id in ids {
+            if next_up_ids.len() >= 3 {
+                break;
+            }
+            next_up_ids.push(id);
+        }
+        if next_up_ids.len() >= 3 {
+            break;
+        }
+    }
+    let next_up_set: std::collections::HashSet<&str> =
+        next_up_ids.iter().copied().collect();
+
+    // Partition features into display groups
     let mut done: Vec<&features::Feature> = Vec::new();
     let mut claimed: Vec<&features::Feature> = Vec::new();
     let mut claimable: Vec<&features::Feature> = Vec::new();
@@ -481,9 +498,29 @@ fn render_feature_dag(features: &features::FeatureList) -> String {
         }
     }
 
+    // Sort claimable by milestone order: features in earlier milestones first
+    let claimable_set: std::collections::HashSet<&str> =
+        claimable_ids.iter().copied().collect();
+    let mut milestone_order: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
+    let mut order = 0;
+    for (_, ids) in &milestone_groups {
+        for id in ids {
+            if claimable_set.contains(id) {
+                milestone_order.insert(id, order);
+                order += 1;
+            }
+        }
+    }
+    claimable.sort_by_key(|f| {
+        milestone_order
+            .get(f.id.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+
     done.sort_by_key(|f| f.priority);
     claimed.sort_by_key(|f| f.priority);
-    claimable.sort_by_key(|f| f.priority);
     pending_blocked_deps.sort_by_key(|f| f.priority);
     blocked.sort_by_key(|f| f.priority);
 
@@ -504,9 +541,6 @@ fn render_feature_dag(features: &features::FeatureList) -> String {
             format!("{}...", &s[..max - 3])
         }
     };
-
-    // Top 3 claimable by priority — matches what `forge run --agents 3` would pick
-    let next_up: Vec<&str> = claimable.iter().take(3).map(|f| f.id.as_str()).collect();
 
     // Render each group
     for f in &done {
@@ -533,7 +567,7 @@ fn render_feature_dag(features: &features::FeatureList) -> String {
     }
 
     for f in &claimable {
-        let indicator = if next_up.contains(&f.id.as_str()) {
+        let indicator = if next_up_set.contains(f.id.as_str()) {
             "\u{25B8}"
         } else {
             "\u{00B7}"
@@ -578,9 +612,23 @@ fn render_feature_dag(features: &features::FeatureList) -> String {
         }
     }
 
-    // Next up line — shows top 3 by priority (what agents would pick)
-    if !next_up.is_empty() {
-        out.push_str(&format!("\nNext up: {}\n", next_up.join(", ")));
+    // Next up — grouped by milestone
+    if !milestone_groups.is_empty() {
+        let has_claimable = milestone_groups.iter().any(|(_, ids)| !ids.is_empty());
+        if has_claimable {
+            out.push('\n');
+            for (ms_id, ids) in &milestone_groups {
+                if ids.is_empty() {
+                    continue;
+                }
+                let top: Vec<&str> = ids.iter().take(3).copied().collect();
+                if ms_id.is_empty() {
+                    out.push_str(&format!("Next up: {}\n", top.join(", ")));
+                } else {
+                    out.push_str(&format!("Next up ({}): {}\n", ms_id, top.join(", ")));
+                }
+            }
+        }
     }
 
     out
@@ -643,7 +691,7 @@ mod tests {
                 make_feature("f001", FeatureType::Implement, "Create User struct", vec![], 1),
                 make_feature("p001", FeatureType::Poc, "Validate thrift parsing", vec![], 1),
                 make_feature("f002", FeatureType::Implement, "Add login endpoint", vec!["f001".into()], 2),
-                make_feature("f003", FeatureType::Review, "Review data-model boundaries", vec!["f001".into()], 3),
+                make_feature("f003", FeatureType::Implement, "Data model boundaries", vec!["f001".into()], 3),
                 make_feature("f004", FeatureType::Implement, "Add user validation", vec!["f002".into(), "f003".into()], 4),
             ],
         };
@@ -664,11 +712,11 @@ mod tests {
         assert!(out.contains("\u{29D7} f002 [impl]"));
         assert!(out.contains("(agent-1)"));
         // f003 is claimable (pending, f001 done)
-        assert!(out.contains("\u{25B8} f003 [review]"));
+        assert!(out.contains("\u{25B8} f003 [impl]"));
         // f004 pending with unmet deps
         assert!(out.contains("\u{00B7} f004 [impl]"));
         assert!(out.contains("\u{2190} f002, f003"));
-        // Next up
+        // Next up (no milestones so orphan list)
         assert!(out.contains("Next up: f003"));
     }
 
@@ -708,24 +756,73 @@ mod tests {
     }
 
     #[test]
-    fn dag_next_up_shows_top_3() {
-        let list = FeatureList {
+    fn dag_milestone_priority() {
+        // M3 (r103) depends on f031, f032
+        // M4 (r104) depends on f036, f042, f043
+        // f042 has lower raw priority than f099, but f042 blocks M4 (earlier milestone)
+        let mut list = FeatureList {
             features: vec![
-                make_feature("f001", FeatureType::Implement, "Feature A", vec![], 1),
-                make_feature("f002", FeatureType::Implement, "Feature B", vec![], 2),
-                make_feature("f003", FeatureType::Implement, "Feature C", vec![], 3),
-                make_feature("f004", FeatureType::Implement, "Feature D", vec![], 4),
-                make_feature("f005", FeatureType::Implement, "Feature E", vec![], 5),
+                // Done deps
+                make_feature("f030", FeatureType::Implement, "Fragment builder", vec![], 50),
+                make_feature("f035", FeatureType::Implement, "Optimizer", vec![], 51),
+                // Claimable: blocks M4
+                make_feature("f042", FeatureType::Implement, "UNION/INTERSECT", vec!["f035".into()], 139),
+                make_feature("f043", FeatureType::Implement, "INSERT", vec!["f030".into()], 140),
+                // Claimable: blocks M5 (lower raw priority number but later milestone)
+                make_feature("f065", FeatureType::Implement, "Role management", vec![], 100),
+                // Orphan claimable (no milestone)
+                make_feature("f099", FeatureType::Implement, "Misc feature", vec![], 1),
+                // Milestones
+                make_feature("r104", FeatureType::Review, "M4 review", vec!["f042".into(), "f043".into()], 154),
+                make_feature("r105", FeatureType::Review, "M5 review", vec!["f065".into()], 179),
             ],
         };
+        list.features[0].status = FeatureStatus::Done; // f030
+        list.features[1].status = FeatureStatus::Done; // f035
+
         let out = render_feature_dag(&list);
-        // Top 3 by priority shown in "Next up"
-        assert!(out.contains("Next up: f001, f002, f003"));
-        // f001-f003 get ▸ indicator, f004-f005 get · indicator
-        assert!(out.contains("\u{25B8} f001"));
-        assert!(out.contains("\u{25B8} f002"));
-        assert!(out.contains("\u{25B8} f003"));
-        assert!(out.contains("\u{00B7} f004"));
-        assert!(out.contains("\u{00B7} f005"));
+
+        // M4 features shown first in "Next up", labeled with milestone
+        assert!(out.contains("Next up (r104): f042, f043"));
+        // M5 features shown separately
+        assert!(out.contains("Next up (r105): f065"));
+        // Orphan shown without milestone label
+        assert!(out.contains("Next up: f099"));
+
+        // Top 3 get ▸: f042, f043 (M4), f065 (M5)
+        assert!(out.contains("\u{25B8} f042"));
+        assert!(out.contains("\u{25B8} f043"));
+        assert!(out.contains("\u{25B8} f065"));
+        // f099 is 4th, gets · (orphan, not in top 3)
+        assert!(out.contains("\u{00B7} f099"));
+
+        // Claimable section ordered by milestone: M4 features before M5 before orphans
+        let pos_042 = out.find("\u{25B8} f042").unwrap();
+        let pos_043 = out.find("\u{25B8} f043").unwrap();
+        let pos_065 = out.find("\u{25B8} f065").unwrap();
+        let pos_099 = out.find("\u{00B7} f099").unwrap();
+        assert!(pos_042 < pos_043, "f042 before f043 (same milestone, lower priority)");
+        assert!(pos_043 < pos_065, "M4 features before M5 features");
+        assert!(pos_065 < pos_099, "milestone features before orphans");
+    }
+
+    #[test]
+    fn dag_transitive_milestone_deps() {
+        // r104 depends on f044, f044 depends on f043 (transitive)
+        // f043 is claimable and should be surfaced as blocking r104
+        let mut list = FeatureList {
+            features: vec![
+                make_feature("f030", FeatureType::Implement, "Done dep", vec![], 50),
+                make_feature("f043", FeatureType::Implement, "INSERT", vec!["f030".into()], 140),
+                make_feature("f044", FeatureType::Implement, "Stream load", vec!["f043".into()], 141),
+                make_feature("r104", FeatureType::Review, "M4 review", vec!["f044".into()], 154),
+            ],
+        };
+        list.features[0].status = FeatureStatus::Done; // f030
+
+        let out = render_feature_dag(&list);
+        // f043 is claimable and transitively blocks r104
+        assert!(out.contains("Next up (r104): f043"));
+        assert!(out.contains("\u{25B8} f043"));
     }
 }

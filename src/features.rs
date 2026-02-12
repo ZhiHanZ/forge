@@ -263,6 +263,75 @@ impl FeatureList {
             .collect()
     }
 
+    /// Return claimable features grouped by the earliest milestone they unblock.
+    /// Milestones are review features, sorted by priority (nearest first).
+    /// Each entry is (milestone_id, vec_of_claimable_ids_sorted_by_priority).
+    /// Features not in any milestone's dep tree are returned under milestone_id = "".
+    pub fn milestone_claimable(&self) -> Vec<(&str, Vec<&str>)> {
+        use std::collections::{HashMap, HashSet, VecDeque};
+
+        let claimable_set: HashSet<&str> = self.claimable_ids().into_iter().collect();
+        if claimable_set.is_empty() {
+            return vec![];
+        }
+
+        let feature_map: HashMap<&str, &Feature> =
+            self.features.iter().map(|f| (f.id.as_str(), f)).collect();
+
+        // Milestones: incomplete review features sorted by priority
+        let mut milestones: Vec<&Feature> = self
+            .features
+            .iter()
+            .filter(|f| f.feature_type == FeatureType::Review && f.status != FeatureStatus::Done)
+            .collect();
+        milestones.sort_by_key(|f| f.priority);
+
+        let mut result = Vec::new();
+        let mut assigned: HashSet<&str> = HashSet::new();
+
+        for ms in &milestones {
+            // BFS over transitive deps to find claimable frontier
+            let mut frontier = Vec::new();
+            let mut visited = HashSet::new();
+            let mut queue = VecDeque::new();
+            for dep in &ms.depends_on {
+                queue.push_back(dep.as_str());
+            }
+            while let Some(dep_id) = queue.pop_front() {
+                if !visited.insert(dep_id) {
+                    continue;
+                }
+                if claimable_set.contains(dep_id) && !assigned.contains(dep_id) {
+                    frontier.push(dep_id);
+                    assigned.insert(dep_id);
+                }
+                if let Some(feat) = feature_map.get(dep_id) {
+                    for sub_dep in &feat.depends_on {
+                        queue.push_back(sub_dep.as_str());
+                    }
+                }
+            }
+            frontier
+                .sort_by_key(|id| feature_map.get(id).map(|f| f.priority).unwrap_or(u32::MAX));
+            if !frontier.is_empty() {
+                result.push((ms.id.as_str(), frontier));
+            }
+        }
+
+        // Orphans: claimable but not in any milestone's dep tree
+        let mut orphans: Vec<&str> = claimable_set
+            .iter()
+            .filter(|id| !assigned.contains(**id))
+            .copied()
+            .collect();
+        orphans.sort_by_key(|id| feature_map.get(id).map(|f| f.priority).unwrap_or(u32::MAX));
+        if !orphans.is_empty() {
+            result.push(("", orphans));
+        }
+
+        result
+    }
+
     /// Check if all features are done.
     pub fn all_done(&self) -> bool {
         self.features.iter().all(|f| f.status == FeatureStatus::Done)
@@ -613,5 +682,152 @@ mod tests {
         list.claim("f001", "agent-1").unwrap();
         // f001 is now claimed, not pending — should not appear
         assert!(list.claimable_ids().is_empty());
+    }
+
+    #[test]
+    fn milestone_claimable_groups_by_review() {
+        let mut list = FeatureList {
+            features: vec![
+                Feature {
+                    id: "f030".into(),
+                    feature_type: FeatureType::Implement,
+                    scope: "sql".into(),
+                    description: "Done dep".into(),
+                    verify: "true".into(),
+                    depends_on: vec![],
+                    priority: 50,
+                    status: FeatureStatus::Done,
+                    claimed_by: None,
+                    blocked_reason: None,
+                    context_hints: vec![],
+                },
+                Feature {
+                    id: "f042".into(),
+                    feature_type: FeatureType::Implement,
+                    scope: "sql".into(),
+                    description: "UNION".into(),
+                    verify: "true".into(),
+                    depends_on: vec!["f030".into()],
+                    priority: 139,
+                    status: FeatureStatus::Pending,
+                    claimed_by: None,
+                    blocked_reason: None,
+                    context_hints: vec![],
+                },
+                Feature {
+                    id: "f065".into(),
+                    feature_type: FeatureType::Implement,
+                    scope: "node".into(),
+                    description: "Role mgmt".into(),
+                    verify: "true".into(),
+                    depends_on: vec![],
+                    priority: 100,
+                    status: FeatureStatus::Pending,
+                    claimed_by: None,
+                    blocked_reason: None,
+                    context_hints: vec![],
+                },
+                Feature {
+                    id: "r104".into(),
+                    feature_type: FeatureType::Review,
+                    scope: "all".into(),
+                    description: "M4 review".into(),
+                    verify: "true".into(),
+                    depends_on: vec!["f042".into()],
+                    priority: 154,
+                    status: FeatureStatus::Pending,
+                    claimed_by: None,
+                    blocked_reason: None,
+                    context_hints: vec![],
+                },
+                Feature {
+                    id: "r105".into(),
+                    feature_type: FeatureType::Review,
+                    scope: "all".into(),
+                    description: "M5 review".into(),
+                    verify: "true".into(),
+                    depends_on: vec!["f065".into()],
+                    priority: 179,
+                    status: FeatureStatus::Pending,
+                    claimed_by: None,
+                    blocked_reason: None,
+                    context_hints: vec![],
+                },
+            ],
+        };
+
+        let groups = list.milestone_claimable();
+        // r104 (priority 154) is the nearest milestone
+        assert_eq!(groups[0].0, "r104");
+        assert_eq!(groups[0].1, vec!["f042"]);
+        // r105 (priority 179) is next
+        assert_eq!(groups[1].0, "r105");
+        assert_eq!(groups[1].1, vec!["f065"]);
+    }
+
+    #[test]
+    fn milestone_claimable_transitive() {
+        let list = FeatureList {
+            features: vec![
+                Feature {
+                    id: "f030".into(),
+                    feature_type: FeatureType::Implement,
+                    scope: "sql".into(),
+                    description: "Done".into(),
+                    verify: "true".into(),
+                    depends_on: vec![],
+                    priority: 50,
+                    status: FeatureStatus::Done,
+                    claimed_by: None,
+                    blocked_reason: None,
+                    context_hints: vec![],
+                },
+                Feature {
+                    id: "f043".into(),
+                    feature_type: FeatureType::Implement,
+                    scope: "sql".into(),
+                    description: "INSERT".into(),
+                    verify: "true".into(),
+                    depends_on: vec!["f030".into()],
+                    priority: 140,
+                    status: FeatureStatus::Pending,
+                    claimed_by: None,
+                    blocked_reason: None,
+                    context_hints: vec![],
+                },
+                Feature {
+                    id: "f044".into(),
+                    feature_type: FeatureType::Implement,
+                    scope: "http".into(),
+                    description: "Stream load".into(),
+                    verify: "true".into(),
+                    depends_on: vec!["f043".into()],
+                    priority: 141,
+                    status: FeatureStatus::Pending,
+                    claimed_by: None,
+                    blocked_reason: None,
+                    context_hints: vec![],
+                },
+                Feature {
+                    id: "r104".into(),
+                    feature_type: FeatureType::Review,
+                    scope: "all".into(),
+                    description: "M4 review".into(),
+                    verify: "true".into(),
+                    // r104 depends on f044, which transitively depends on f043
+                    depends_on: vec!["f044".into()],
+                    priority: 154,
+                    status: FeatureStatus::Pending,
+                    claimed_by: None,
+                    blocked_reason: None,
+                    context_hints: vec![],
+                },
+            ],
+        };
+
+        let groups = list.milestone_claimable();
+        // f043 is claimable and transitively blocks r104 (via f044)
+        assert_eq!(groups[0].0, "r104");
+        assert_eq!(groups[0].1, vec!["f043"]);
     }
 }
