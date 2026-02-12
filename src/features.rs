@@ -46,6 +46,7 @@ pub enum FeatureType {
 pub enum FeatureStatus {
     #[default]
     Pending,
+    #[serde(alias = "in_progress")]
     Claimed,
     Done,
     Blocked,
