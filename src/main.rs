@@ -505,7 +505,8 @@ fn render_feature_dag(features: &features::FeatureList) -> String {
         }
     };
 
-    let first_claimable = claimable.first().map(|f| f.id.as_str());
+    // Top 3 claimable by priority — matches what `forge run --agents 3` would pick
+    let next_up: Vec<&str> = claimable.iter().take(3).map(|f| f.id.as_str()).collect();
 
     // Render each group
     for f in &done {
@@ -526,17 +527,16 @@ fn render_feature_dag(features: &features::FeatureList) -> String {
             truncate(&f.description, 50),
             agent
         ));
-        // Show deps for non-done features
         if !f.depends_on.is_empty() {
             out.push_str(&format!("    \u{2190} {}\n", f.depends_on.join(", ")));
         }
     }
 
     for f in &claimable {
-        let indicator = if Some(f.id.as_str()) == first_claimable {
+        let indicator = if next_up.contains(&f.id.as_str()) {
             "\u{25B8}"
         } else {
-            "\u{25B8}"
+            "\u{00B7}"
         };
         out.push_str(&format!(
             "  {} {} [{}]  {}\n",
@@ -578,9 +578,9 @@ fn render_feature_dag(features: &features::FeatureList) -> String {
         }
     }
 
-    // Next claimable line
-    if let Some(next_id) = first_claimable {
-        out.push_str(&format!("\nNext claimable: {next_id}\n"));
+    // Next up line — shows top 3 by priority (what agents would pick)
+    if !next_up.is_empty() {
+        out.push_str(&format!("\nNext up: {}\n", next_up.join(", ")));
     }
 
     out
@@ -632,8 +632,8 @@ mod tests {
         assert!(out.contains("Progress: 100%"));
         assert!(out.contains("\u{2713} f001"));
         assert!(out.contains("\u{2713} f002"));
-        // No "Next claimable" when all done
-        assert!(!out.contains("Next claimable"));
+        // No "Next up" when all done
+        assert!(!out.contains("Next up"));
     }
 
     #[test]
@@ -668,8 +668,8 @@ mod tests {
         // f004 pending with unmet deps
         assert!(out.contains("\u{00B7} f004 [impl]"));
         assert!(out.contains("\u{2190} f002, f003"));
-        // Next claimable
-        assert!(out.contains("Next claimable: f003"));
+        // Next up
+        assert!(out.contains("Next up: f003"));
     }
 
     #[test]
@@ -705,5 +705,27 @@ mod tests {
         assert!(out.contains("..."));
         // Should not contain the full description
         assert!(!out.contains("should be truncated"));
+    }
+
+    #[test]
+    fn dag_next_up_shows_top_3() {
+        let list = FeatureList {
+            features: vec![
+                make_feature("f001", FeatureType::Implement, "Feature A", vec![], 1),
+                make_feature("f002", FeatureType::Implement, "Feature B", vec![], 2),
+                make_feature("f003", FeatureType::Implement, "Feature C", vec![], 3),
+                make_feature("f004", FeatureType::Implement, "Feature D", vec![], 4),
+                make_feature("f005", FeatureType::Implement, "Feature E", vec![], 5),
+            ],
+        };
+        let out = render_feature_dag(&list);
+        // Top 3 by priority shown in "Next up"
+        assert!(out.contains("Next up: f001, f002, f003"));
+        // f001-f003 get ▸ indicator, f004-f005 get · indicator
+        assert!(out.contains("\u{25B8} f001"));
+        assert!(out.contains("\u{25B8} f002"));
+        assert!(out.contains("\u{25B8} f003"));
+        assert!(out.contains("\u{00B7} f004"));
+        assert!(out.contains("\u{00B7} f005"));
     }
 }
