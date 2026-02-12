@@ -461,7 +461,7 @@ fn render_feature_dag(features: &features::FeatureList) -> String {
     let feature_map: HashMap<&str, &features::Feature> =
         features.features.iter().map(|f| (f.id.as_str(), f)).collect();
 
-    // === Milestones: only review features with M\d+ labels ===
+    // === Milestones: review features with M-prefixed labels ===
     let mut milestones: Vec<&features::Feature> = features
         .features
         .iter()
@@ -542,7 +542,7 @@ fn render_feature_dag(features: &features::FeatureList) -> String {
 
             let short_desc = milestone_desc(&ms.description, &label);
             let ratio = format!("{done_count}/{total}");
-            let mut line = format!("  {} {:<6} {:>5}", indicator, label, ratio);
+            let mut line = format!("  {} {:<10} {:>5}", indicator, label, ratio);
             if !short_desc.is_empty() {
                 line.push_str(&format!("  {short_desc}"));
             }

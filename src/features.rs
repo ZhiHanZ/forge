@@ -257,13 +257,16 @@ impl FeatureList {
     }
 
     /// Extract milestone label from a review feature's description.
-    /// Looks for "M\d+" pattern (e.g. "M4 milestone review" → "M4").
-    /// Falls back to the feature id.
+    /// Looks for "M" followed by a digit then optional alphanumeric/dot/hyphen
+    /// (e.g. "M4", "M2-PG", "M3.5", "M4-writes"). Falls back to the feature id.
     pub fn milestone_label(feature: &Feature) -> String {
         for word in feature.description.split_whitespace() {
             if word.starts_with('M')
                 && word.len() >= 2
-                && word[1..].chars().all(|c| c.is_ascii_digit() || c == '-')
+                && word.as_bytes()[1].is_ascii_digit()
+                && word[1..]
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
             {
                 return word.to_string();
             }
@@ -271,15 +274,13 @@ impl FeatureList {
         feature.id.clone()
     }
 
-    /// Extract milestone sort key from label: "M4" → 4, "M2-PG" → 2.
-    pub(crate) fn milestone_sort_key(label: &str) -> u32 {
-        label
-            .trim_start_matches('M')
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>()
-            .parse()
-            .unwrap_or(u32::MAX)
+    /// Extract milestone sort key from label: "M4" → (4,""), "M3.5" → (3,".5"), "M2-PG" → (2,"-PG").
+    /// Base milestones sort before sub-milestones of the same number.
+    pub(crate) fn milestone_sort_key(label: &str) -> (u32, String) {
+        let rest = label.trim_start_matches('M');
+        let major: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let suffix = &rest[major.len()..];
+        (major.parse().unwrap_or(u32::MAX), suffix.to_string())
     }
 
     /// Return claimable features grouped by the earliest milestone they unblock.
@@ -852,5 +853,47 @@ mod tests {
         // f043 is claimable and transitively blocks M4 (via f044)
         assert_eq!(groups[0].0, "M4");
         assert_eq!(groups[0].1, vec!["f043"]);
+    }
+
+    #[test]
+    fn milestone_label_extended_patterns() {
+        let make = |desc: &str| Feature {
+            id: "r999".into(),
+            feature_type: FeatureType::Review,
+            scope: "all".into(),
+            description: desc.into(),
+            verify: "true".into(),
+            depends_on: vec![],
+            priority: 0,
+            status: FeatureStatus::Pending,
+            claimed_by: None,
+            blocked_reason: None,
+            context_hints: vec![],
+        };
+
+        // Basic: M4
+        assert_eq!(FeatureList::milestone_label(&make("M4 milestone review")), "M4");
+        // Hyphen + letters: M2-PG
+        assert_eq!(FeatureList::milestone_label(&make("M2-PG protocol review")), "M2-PG");
+        // Dot: M3.5
+        assert_eq!(FeatureList::milestone_label(&make("M3.5 milestone review")), "M3.5");
+        // Hyphen + word: M4-writes
+        assert_eq!(FeatureList::milestone_label(&make("M4-writes milestone review")), "M4-writes");
+        // Fallback to id when no M-label
+        assert_eq!(FeatureList::milestone_label(&make("some review without label")), "r999");
+        // Must start with digit after M
+        assert_eq!(FeatureList::milestone_label(&make("MySQL review")), "r999");
+    }
+
+    #[test]
+    fn milestone_sort_key_ordering() {
+        let k = FeatureList::milestone_sort_key;
+        assert!(k("M1") < k("M2"));
+        assert!(k("M2") < k("M2-PG"));
+        assert!(k("M2-PG") < k("M3"));
+        assert!(k("M3") < k("M3.5"));
+        assert!(k("M3.5") < k("M4"));
+        assert!(k("M4") < k("M4-writes"));
+        assert!(k("M4-writes") < k("M5"));
     }
 }
