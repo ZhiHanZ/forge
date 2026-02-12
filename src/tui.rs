@@ -383,14 +383,70 @@ fn cleanup_exited_panes(panes: &mut Vec<PtyPane>, active_pane: &mut Option<usize
     }
 }
 
-fn load_status_counts(project_dir: &Path) -> StatusCounts {
-    FeatureList::load(project_dir)
+struct TuiStatus {
+    counts: StatusCounts,
+    milestones: String, // e.g. "M3 ✓ | M4 6/14 | M5 0/4"
+}
+
+fn load_tui_status(project_dir: &Path) -> TuiStatus {
+    let features = FeatureList::load(project_dir).ok();
+    let counts = features
+        .as_ref()
         .map(|f| f.status_counts())
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    let milestones = features
+        .as_ref()
+        .map(|fl| {
+            let feature_map: std::collections::HashMap<&str, &crate::features::Feature> =
+                fl.features.iter().map(|f| (f.id.as_str(), f)).collect();
+
+            let mut ms_list: Vec<&crate::features::Feature> = fl
+                .features
+                .iter()
+                .filter(|f| {
+                    f.feature_type == crate::features::FeatureType::Review
+                        && FeatureList::milestone_label(f).starts_with('M')
+                })
+                .collect();
+            ms_list.sort_by_key(|f| {
+                let label = FeatureList::milestone_label(f);
+                FeatureList::milestone_sort_key(&label)
+            });
+
+            let parts: Vec<String> = ms_list
+                .iter()
+                .map(|ms| {
+                    let label = FeatureList::milestone_label(ms);
+                    if ms.status == crate::features::FeatureStatus::Done {
+                        format!("{label} \u{2713}")
+                    } else {
+                        let total = ms.depends_on.len();
+                        let done = ms
+                            .depends_on
+                            .iter()
+                            .filter(|d| {
+                                feature_map
+                                    .get(d.as_str())
+                                    .is_some_and(|f| {
+                                        f.status == crate::features::FeatureStatus::Done
+                                    })
+                            })
+                            .count();
+                        format!("{label} {done}/{total}")
+                    }
+                })
+                .collect();
+            parts.join(" | ")
+        })
+        .unwrap_or_default();
+
+    TuiStatus { counts, milestones }
 }
 
 fn render_status_bar(
     counts: &StatusCounts,
+    milestones: &str,
     command_mode: bool,
     cocoindex_status: &str,
     working_info: &str,
@@ -403,10 +459,17 @@ fn render_status_bar(
         0.0
     };
 
-    let status_text = format!(
-        " Features: {}/{} done ({pct:.0}%) | {} pending | {} claimed | {} blocked ",
-        counts.done, counts.total, counts.pending, counts.claimed, counts.blocked,
-    );
+    let status_text = if milestones.is_empty() {
+        format!(
+            " Features: {}/{} done ({pct:.0}%) | {} pending | {} claimed ",
+            counts.done, counts.total, counts.pending, counts.claimed,
+        )
+    } else {
+        format!(
+            " {}/{} ({pct:.0}%) | {} ",
+            counts.done, counts.total, milestones,
+        )
+    };
 
     let idx_span = if !cocoindex_status.is_empty() {
         format!(" [idx: {}] ", cocoindex_status)
@@ -551,7 +614,7 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
 
     let mut panes: Vec<PtyPane> = Vec::new();
     let mut active_pane: Option<usize> = None;
-    let mut status_counts = load_status_counts(&config.project_dir);
+    let mut tui_status = load_tui_status(&config.project_dir);
     let mut status_tick = 0u32;
     let mut command_mode = false;
     let mut next_agent_id: u32 = 0;
@@ -669,7 +732,7 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
                 }
             }
 
-            render_status_bar(&status_counts, command_mode, &coco_str, &working_info, status_area, frame);
+            render_status_bar(&tui_status.counts, &tui_status.milestones, command_mode, &coco_str, &working_info, status_area, frame);
         })?;
 
         if event::poll(Duration::from_millis(10))? {
@@ -756,7 +819,7 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
         status_tick += 1;
         if status_tick >= 200 {
             status_tick = 0;
-            status_counts = load_status_counts(&project_dir);
+            tui_status = load_tui_status(&project_dir);
         }
 
         // Replace exited panes with next available features
@@ -804,8 +867,8 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
 
         // If all panes are gone and no features left, exit
         if panes.is_empty() {
-            status_counts = load_status_counts(&project_dir);
-            if status_counts.pending == 0 && status_counts.claimed == 0 {
+            tui_status = load_tui_status(&project_dir);
+            if tui_status.counts.pending == 0 && tui_status.counts.claimed == 0 {
                 break;
             }
         }
@@ -1209,13 +1272,13 @@ mod tests {
 
     // ── render_status_bar tests ──────────────────────────────────────
 
-    fn render_status_bar_to_string(counts: &StatusCounts, command_mode: bool) -> String {
+    fn render_status_bar_to_string(counts: &StatusCounts, milestones: &str, command_mode: bool) -> String {
         let backend = TestBackend::new(120, 1);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                render_status_bar(counts, command_mode, "", "", area, frame);
+                render_status_bar(counts, milestones, command_mode, "", "", area, frame);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -1237,9 +1300,11 @@ mod tests {
             done: 4,
             blocked: 1,
         };
-        let text = render_status_bar_to_string(&counts, false);
-        assert!(text.contains("4/10 done (40%)"), "got: {text}");
-        assert!(text.contains("3 pending"), "got: {text}");
+        let ms = "M3 \u{2713} | M4 2/6";
+        let text = render_status_bar_to_string(&counts, ms, false);
+        assert!(text.contains("4/10 (40%)"), "got: {text}");
+        assert!(text.contains("M3 \u{2713}"), "got: {text}");
+        assert!(text.contains("M4 2/6"), "got: {text}");
         assert!(text.contains("Ctrl+G: command mode"), "got: {text}");
     }
 
@@ -1252,7 +1317,7 @@ mod tests {
             done: 2,
             blocked: 1,
         };
-        let text = render_status_bar_to_string(&counts, true);
+        let text = render_status_bar_to_string(&counts, "", true);
         assert!(text.contains("CMD"), "got: {text}");
         assert!(text.contains("q:quit"), "got: {text}");
         assert!(text.contains("n:new"), "got: {text}");
@@ -1267,8 +1332,8 @@ mod tests {
             done: 0,
             blocked: 0,
         };
-        let text = render_status_bar_to_string(&counts, false);
-        assert!(text.contains("0/0 done (0%)"), "got: {text}");
+        let text = render_status_bar_to_string(&counts, "", false);
+        assert!(text.contains("0/0"), "got: {text}");
     }
 
     // ── resize debounce tests ────────────────────────────────────────
