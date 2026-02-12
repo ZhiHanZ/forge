@@ -272,7 +272,7 @@ impl FeatureList {
     }
 
     /// Extract milestone sort key from label: "M4" → 4, "M2-PG" → 2.
-    fn milestone_sort_key(label: &str) -> u32 {
+    pub(crate) fn milestone_sort_key(label: &str) -> u32 {
         label
             .trim_start_matches('M')
             .chars()

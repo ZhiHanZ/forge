@@ -433,7 +433,8 @@ fn cmd_status(project_dir: &PathBuf) {
 }
 
 fn render_feature_dag(features: &features::FeatureList) -> String {
-    use features::{FeatureStatus, FeatureType};
+    use features::{FeatureList, FeatureStatus, FeatureType};
+    use std::collections::HashMap;
 
     let counts = features.status_counts();
     let mut out = String::new();
@@ -457,83 +458,69 @@ fn render_feature_dag(features: &features::FeatureList) -> String {
         return out;
     }
 
-    let claimable_ids = features.claimable_ids();
-    let milestone_groups = features.milestone_claimable();
+    let feature_map: HashMap<&str, &features::Feature> =
+        features.features.iter().map(|f| (f.id.as_str(), f)).collect();
 
-    // Build a set of "next up" IDs: top 3 from milestone ordering
-    let mut next_up_ids: Vec<&str> = Vec::new();
-    for (_, ids) in &milestone_groups {
-        for id in ids {
-            if next_up_ids.len() >= 3 {
-                break;
-            }
-            next_up_ids.push(id);
-        }
-        if next_up_ids.len() >= 3 {
-            break;
-        }
-    }
-    let next_up_set: std::collections::HashSet<&str> =
-        next_up_ids.iter().copied().collect();
-
-    // Partition features into display groups
-    let mut done: Vec<&features::Feature> = Vec::new();
-    let mut claimed: Vec<&features::Feature> = Vec::new();
-    let mut claimable: Vec<&features::Feature> = Vec::new();
-    let mut pending_blocked_deps: Vec<&features::Feature> = Vec::new();
-    let mut blocked: Vec<&features::Feature> = Vec::new();
-
-    for f in &features.features {
-        match f.status {
-            FeatureStatus::Done => done.push(f),
-            FeatureStatus::Claimed => claimed.push(f),
-            FeatureStatus::Blocked => blocked.push(f),
-            FeatureStatus::Pending => {
-                if claimable_ids.contains(&f.id.as_str()) {
-                    claimable.push(f);
-                } else {
-                    pending_blocked_deps.push(f);
-                }
-            }
-        }
-    }
-
-    // Sort claimable by milestone order: features in earlier milestones first
-    let claimable_set: std::collections::HashSet<&str> =
-        claimable_ids.iter().copied().collect();
-    let mut milestone_order: std::collections::HashMap<&str, usize> =
-        std::collections::HashMap::new();
-    let mut order = 0;
-    for (_, ids) in &milestone_groups {
-        for id in ids {
-            if claimable_set.contains(id) {
-                milestone_order.insert(id, order);
-                order += 1;
-            }
-        }
-    }
-    claimable.sort_by_key(|f| {
-        milestone_order
-            .get(f.id.as_str())
-            .copied()
-            .unwrap_or(usize::MAX)
+    // === Milestones: only review features with M\d+ labels ===
+    let mut milestones: Vec<&features::Feature> = features
+        .features
+        .iter()
+        .filter(|f| f.feature_type == FeatureType::Review)
+        .filter(|f| {
+            let label = FeatureList::milestone_label(f);
+            label.starts_with('M')
+        })
+        .collect();
+    milestones.sort_by_key(|f| {
+        let label = FeatureList::milestone_label(f);
+        FeatureList::milestone_sort_key(&label)
     });
 
-    done.sort_by_key(|f| f.priority);
-    claimed.sort_by_key(|f| f.priority);
-    pending_blocked_deps.sort_by_key(|f| f.priority);
-    blocked.sort_by_key(|f| f.priority);
+    if !milestones.is_empty() {
+        out.push_str("\nMilestones:\n");
+        for ms in &milestones {
+            let label = FeatureList::milestone_label(ms);
+            let total = ms.depends_on.len();
+            let done_count = ms
+                .depends_on
+                .iter()
+                .filter(|dep| {
+                    feature_map
+                        .get(dep.as_str())
+                        .is_some_and(|f| f.status == FeatureStatus::Done)
+                })
+                .count();
+            let wip_count = ms
+                .depends_on
+                .iter()
+                .filter(|dep| {
+                    feature_map
+                        .get(dep.as_str())
+                        .is_some_and(|f| f.status == FeatureStatus::Claimed)
+                })
+                .count();
 
-    out.push('\n');
+            let indicator = if ms.status == FeatureStatus::Done {
+                "\u{2713}" // ✓
+            } else if done_count + wip_count > 0 {
+                "\u{25D0}" // ◐
+            } else {
+                "\u{00B7}" // ·
+            };
 
-    let type_tag = |t: &FeatureType| -> &str {
-        match t {
-            FeatureType::Implement => "impl",
-            FeatureType::Review => "review",
-            FeatureType::Poc => "poc",
+            let ratio = format!("{done_count}/{total}");
+            if wip_count > 0 {
+                out.push_str(&format!(
+                    "  {} {:<6} {:>5}  ({} wip)\n",
+                    indicator, label, ratio, wip_count
+                ));
+            } else {
+                out.push_str(&format!("  {} {:<6} {:>5}\n", indicator, label, ratio));
+            }
         }
-    };
+    }
 
+    // === In progress (claimed features) ===
     let truncate = |s: &str, max: usize| -> String {
         if s.len() <= max {
             s.to_string()
@@ -542,77 +529,51 @@ fn render_feature_dag(features: &features::FeatureList) -> String {
         }
     };
 
-    // Render each group
-    for f in &done {
-        out.push_str(&format!(
-            "  \u{2713} {} [{}]  {}\n",
-            f.id,
-            type_tag(&f.feature_type),
-            truncate(&f.description, 50)
-        ));
-    }
+    let mut claimed: Vec<&features::Feature> = features
+        .features
+        .iter()
+        .filter(|f| f.status == FeatureStatus::Claimed)
+        .collect();
+    claimed.sort_by_key(|f| f.priority);
 
-    for f in &claimed {
-        let agent = f.claimed_by.as_deref().unwrap_or("?");
-        out.push_str(&format!(
-            "  \u{29D7} {} [{}]  {}  ({})\n",
-            f.id,
-            type_tag(&f.feature_type),
-            truncate(&f.description, 50),
-            agent
-        ));
-        if !f.depends_on.is_empty() {
-            out.push_str(&format!("    \u{2190} {}\n", f.depends_on.join(", ")));
+    if !claimed.is_empty() {
+        out.push_str("\nIn progress:\n");
+        for f in &claimed {
+            let agent = f.claimed_by.as_deref().unwrap_or("?");
+            out.push_str(&format!(
+                "  \u{29D7} {}  {}  ({})\n",
+                f.id,
+                truncate(&f.description, 45),
+                agent
+            ));
         }
     }
 
-    for f in &claimable {
-        let indicator = if next_up_set.contains(f.id.as_str()) {
-            "\u{25B8}"
-        } else {
-            "\u{00B7}"
-        };
-        out.push_str(&format!(
-            "  {} {} [{}]  {}\n",
-            indicator,
-            f.id,
-            type_tag(&f.feature_type),
-            truncate(&f.description, 50)
-        ));
-        if !f.depends_on.is_empty() {
-            out.push_str(&format!("    \u{2190} {}\n", f.depends_on.join(", ")));
+    // === Blocked features ===
+    let mut blocked: Vec<&features::Feature> = features
+        .features
+        .iter()
+        .filter(|f| f.status == FeatureStatus::Blocked)
+        .collect();
+    blocked.sort_by_key(|f| f.priority);
+
+    if !blocked.is_empty() {
+        out.push_str("\nBlocked:\n");
+        for f in &blocked {
+            let reason = f.blocked_reason.as_deref().unwrap_or("");
+            out.push_str(&format!(
+                "  \u{2717} {}  {}\n",
+                f.id,
+                truncate(&f.description, 45),
+            ));
+            if !reason.is_empty() {
+                out.push_str(&format!("    reason: {reason}\n"));
+            }
         }
     }
 
-    for f in &pending_blocked_deps {
-        out.push_str(&format!(
-            "  \u{00B7} {} [{}]  {}\n",
-            f.id,
-            type_tag(&f.feature_type),
-            truncate(&f.description, 50)
-        ));
-        if !f.depends_on.is_empty() {
-            out.push_str(&format!("    \u{2190} {}\n", f.depends_on.join(", ")));
-        }
-    }
-
-    for f in &blocked {
-        let reason = f.blocked_reason.as_deref().unwrap_or("");
-        out.push_str(&format!(
-            "  \u{2717} {} [{}]  {}\n",
-            f.id,
-            type_tag(&f.feature_type),
-            truncate(&f.description, 50)
-        ));
-        if !reason.is_empty() {
-            out.push_str(&format!("    blocked: {reason}\n"));
-        }
-        if !f.depends_on.is_empty() {
-            out.push_str(&format!("    \u{2190} {}\n", f.depends_on.join(", ")));
-        }
-    }
-
-    // Next up — grouped by milestone
+    // === Next up (grouped by milestone) ===
+    let milestone_groups = features.milestone_claimable();
     if !milestone_groups.is_empty() {
         let has_claimable = milestone_groups.iter().any(|(_, ids)| !ids.is_empty());
         if has_claimable {
@@ -661,7 +622,6 @@ mod tests {
         let out = render_feature_dag(&list);
         assert!(out.contains("0 total"));
         assert!(out.contains("0 done"));
-        // Should not panic
     }
 
     #[test]
@@ -678,10 +638,8 @@ mod tests {
         let out = render_feature_dag(&list);
         assert!(out.contains("2 done"));
         assert!(out.contains("Progress: 100%"));
-        assert!(out.contains("\u{2713} f001"));
-        assert!(out.contains("\u{2713} f002"));
-        // No "Next up" when all done
         assert!(!out.contains("Next up"));
+        assert!(!out.contains("In progress"));
     }
 
     #[test]
@@ -689,34 +647,22 @@ mod tests {
         let mut list = FeatureList {
             features: vec![
                 make_feature("f001", FeatureType::Implement, "Create User struct", vec![], 1),
-                make_feature("p001", FeatureType::Poc, "Validate thrift parsing", vec![], 1),
                 make_feature("f002", FeatureType::Implement, "Add login endpoint", vec!["f001".into()], 2),
                 make_feature("f003", FeatureType::Implement, "Data model boundaries", vec!["f001".into()], 3),
                 make_feature("f004", FeatureType::Implement, "Add user validation", vec!["f002".into(), "f003".into()], 4),
             ],
         };
-        // f001 done, p001 done, f002 claimed
         list.features[0].status = FeatureStatus::Done;
-        list.features[1].status = FeatureStatus::Done;
-        list.features[2].status = FeatureStatus::Claimed;
-        list.features[2].claimed_by = Some("agent-1".into());
+        list.features[1].status = FeatureStatus::Claimed;
+        list.features[1].claimed_by = Some("agent-1".into());
 
         let out = render_feature_dag(&list);
-        // Header
-        assert!(out.contains("5 total (2 done, 1 claimed, 2 pending)"));
-        assert!(out.contains("Progress: 40%"));
-        // Done features with checkmark
-        assert!(out.contains("\u{2713} f001 [impl]"));
-        assert!(out.contains("\u{2713} p001 [poc]"));
-        // Claimed feature with hourglass
-        assert!(out.contains("\u{29D7} f002 [impl]"));
+        assert!(out.contains("4 total (1 done, 1 claimed, 2 pending)"));
+        assert!(out.contains("Progress: 25%"));
+        // Claimed in "In progress" section
+        assert!(out.contains("\u{29D7} f002"));
         assert!(out.contains("(agent-1)"));
-        // f003 is claimable (pending, f001 done)
-        assert!(out.contains("\u{25B8} f003 [impl]"));
-        // f004 pending with unmet deps
-        assert!(out.contains("\u{00B7} f004 [impl]"));
-        assert!(out.contains("\u{2190} f002, f003"));
-        // Next up (no milestones so orphan list)
+        // f003 is claimable → shows in "Next up"
         assert!(out.contains("Next up: f003"));
     }
 
@@ -731,48 +677,87 @@ mod tests {
         list.features[0].blocked_reason = Some("stuck on compile error".into());
 
         let out = render_feature_dag(&list);
-        assert!(out.contains("\u{2717} f001 [impl]"));
-        assert!(out.contains("blocked: stuck on compile error"));
+        assert!(out.contains("\u{2717} f001"));
+        assert!(out.contains("reason: stuck on compile error"));
     }
 
     #[test]
     fn dag_truncates_long_description() {
-        let list = FeatureList {
+        let mut list = FeatureList {
             features: vec![
                 make_feature(
                     "f001",
                     FeatureType::Implement,
-                    "This is a very long description that exceeds fifty characters and should be truncated",
+                    "This is a very long description that exceeds forty-five characters and should be truncated",
                     vec![],
                     1,
                 ),
             ],
         };
+        // Must be claimed or blocked to show individual description
+        list.features[0].status = FeatureStatus::Claimed;
+        list.features[0].claimed_by = Some("agent-1".into());
         let out = render_feature_dag(&list);
-        // Description should be truncated to 50 chars with "..."
         assert!(out.contains("..."));
-        // Should not contain the full description
         assert!(!out.contains("should be truncated"));
     }
 
     #[test]
-    fn dag_milestone_priority() {
-        // M3 (r103) depends on f031, f032
-        // M4 (r104) depends on f036, f042, f043
-        // f042 has lower raw priority than f099, but f042 blocks M4 (earlier milestone)
+    fn dag_milestone_summary() {
         let mut list = FeatureList {
             features: vec![
-                // Done deps
+                make_feature("f001", FeatureType::Implement, "Feature A", vec![], 1),
+                make_feature("f002", FeatureType::Implement, "Feature B", vec![], 2),
+                make_feature("f003", FeatureType::Implement, "Feature C", vec!["f001".into()], 3),
+                make_feature("f004", FeatureType::Implement, "Feature D", vec![], 4),
+                make_feature("r101", FeatureType::Review, "M1 Foundation review", vec!["f001".into(), "f002".into()], 10),
+                make_feature("r104", FeatureType::Review, "M4 milestone review", vec!["f003".into(), "f004".into()], 20),
+            ],
+        };
+        list.features[0].status = FeatureStatus::Done; // f001
+        list.features[1].status = FeatureStatus::Done; // f002
+        list.features[3].status = FeatureStatus::Done; // f004
+        list.features[4].status = FeatureStatus::Done; // r101
+
+        let out = render_feature_dag(&list);
+        // M1 done: 2/2
+        assert!(out.contains("\u{2713}") && out.contains("M1"), "M1 should show done: {out}");
+        assert!(out.contains("2/2"), "M1 should show 2/2: {out}");
+        // M4 partial: f004 is done (1/2 done), f003 still pending
+        assert!(out.contains("\u{25D0}"), "M4 should show partial: {out}");
+        assert!(out.contains("1/2"), "M4 should show 1/2: {out}");
+    }
+
+    #[test]
+    fn dag_milestone_wip_count() {
+        let mut list = FeatureList {
+            features: vec![
+                make_feature("f001", FeatureType::Implement, "A", vec![], 1),
+                make_feature("f002", FeatureType::Implement, "B", vec![], 2),
+                make_feature("f003", FeatureType::Implement, "C", vec![], 3),
+                make_feature("r104", FeatureType::Review, "M4 review", vec!["f001".into(), "f002".into(), "f003".into()], 10),
+            ],
+        };
+        list.features[0].status = FeatureStatus::Done;
+        list.features[1].status = FeatureStatus::Claimed;
+        list.features[1].claimed_by = Some("agent-1".into());
+
+        let out = render_feature_dag(&list);
+        assert!(out.contains("1/3"), "M4 should show 1 done out of 3: {out}");
+        assert!(out.contains("1 wip"), "M4 should show 1 wip: {out}");
+        assert!(out.contains("\u{25D0}"), "M4 should show partial indicator: {out}");
+    }
+
+    #[test]
+    fn dag_milestone_priority() {
+        let mut list = FeatureList {
+            features: vec![
                 make_feature("f030", FeatureType::Implement, "Fragment builder", vec![], 50),
                 make_feature("f035", FeatureType::Implement, "Optimizer", vec![], 51),
-                // Claimable: blocks M4
                 make_feature("f042", FeatureType::Implement, "UNION/INTERSECT", vec!["f035".into()], 139),
                 make_feature("f043", FeatureType::Implement, "INSERT", vec!["f030".into()], 140),
-                // Claimable: blocks M5 (lower raw priority number but later milestone)
                 make_feature("f065", FeatureType::Implement, "Role management", vec![], 100),
-                // Orphan claimable (no milestone)
                 make_feature("f099", FeatureType::Implement, "Misc feature", vec![], 1),
-                // Milestones
                 make_feature("r104", FeatureType::Review, "M4 review", vec!["f042".into(), "f043".into()], 154),
                 make_feature("r105", FeatureType::Review, "M5 review", vec!["f065".into()], 179),
             ],
@@ -782,34 +767,21 @@ mod tests {
 
         let out = render_feature_dag(&list);
 
-        // M4 features shown first in "Next up", labeled with milestone
-        assert!(out.contains("Next up (M4): f042, f043"));
-        // M5 features shown separately
-        assert!(out.contains("Next up (M5): f065"));
-        // Orphan shown without milestone label
-        assert!(out.contains("Next up: f099"));
-
-        // Top 3 get ▸: f042, f043 (M4), f065 (M5)
-        assert!(out.contains("\u{25B8} f042"));
-        assert!(out.contains("\u{25B8} f043"));
-        assert!(out.contains("\u{25B8} f065"));
-        // f099 is 4th, gets · (orphan, not in top 3)
-        assert!(out.contains("\u{00B7} f099"));
-
-        // Claimable section ordered by milestone: M4 features before M5 before orphans
-        let pos_042 = out.find("\u{25B8} f042").unwrap();
-        let pos_043 = out.find("\u{25B8} f043").unwrap();
-        let pos_065 = out.find("\u{25B8} f065").unwrap();
-        let pos_099 = out.find("\u{00B7} f099").unwrap();
-        assert!(pos_042 < pos_043, "f042 before f043 (same milestone, lower priority)");
-        assert!(pos_043 < pos_065, "M4 features before M5 features");
-        assert!(pos_065 < pos_099, "milestone features before orphans");
+        // Milestone summary shows both
+        assert!(out.contains("M4"), "Should show M4: {out}");
+        assert!(out.contains("M5"), "Should show M5: {out}");
+        // Next up grouped by milestone
+        assert!(out.contains("Next up (M4): f042, f043"), "M4 next up: {out}");
+        assert!(out.contains("Next up (M5): f065"), "M5 next up: {out}");
+        assert!(out.contains("Next up: f099"), "Orphan next up: {out}");
+        // M4 before M5
+        let pos_m4 = out.find("Next up (M4)").unwrap();
+        let pos_m5 = out.find("Next up (M5)").unwrap();
+        assert!(pos_m4 < pos_m5, "M4 before M5 in next up");
     }
 
     #[test]
     fn dag_transitive_milestone_deps() {
-        // r104 depends on f044, f044 depends on f043 (transitive)
-        // f043 is claimable and should be surfaced as blocking r104
         let mut list = FeatureList {
             features: vec![
                 make_feature("f030", FeatureType::Implement, "Done dep", vec![], 50),
@@ -821,8 +793,22 @@ mod tests {
         list.features[0].status = FeatureStatus::Done; // f030
 
         let out = render_feature_dag(&list);
-        // f043 is claimable and transitively blocks M4
-        assert!(out.contains("Next up (M4): f043"));
-        assert!(out.contains("\u{25B8} f043"));
+        assert!(out.contains("Next up (M4): f043"), "Transitive dep in next up: {out}");
+    }
+
+    #[test]
+    fn dag_no_milestone_labels_skips_section() {
+        // Review features without M\d+ labels should not show in Milestones section
+        let mut list = FeatureList {
+            features: vec![
+                make_feature("f001", FeatureType::Implement, "Feature A", vec![], 1),
+                make_feature("r001", FeatureType::Review, "Review p001 results", vec!["f001".into()], 10),
+            ],
+        };
+        list.features[0].status = FeatureStatus::Done;
+        list.features[1].status = FeatureStatus::Done;
+
+        let out = render_feature_dag(&list);
+        assert!(!out.contains("Milestones:"), "No milestone section for non-M reviews: {out}");
     }
 }
