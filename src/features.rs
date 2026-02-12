@@ -245,6 +245,23 @@ impl FeatureList {
             .min_by_key(|f| f.priority)
     }
 
+    /// Return IDs of all currently claimable features (pending with all deps done).
+    pub fn claimable_ids(&self) -> Vec<&str> {
+        let done_ids: Vec<&str> = self
+            .features
+            .iter()
+            .filter(|f| f.status == FeatureStatus::Done)
+            .map(|f| f.id.as_str())
+            .collect();
+
+        self.features
+            .iter()
+            .filter(|f| f.status == FeatureStatus::Pending)
+            .filter(|f| f.depends_on.iter().all(|dep| done_ids.contains(&dep.as_str())))
+            .map(|f| f.id.as_str())
+            .collect()
+    }
+
     /// Check if all features are done.
     pub fn all_done(&self) -> bool {
         self.features.iter().all(|f| f.status == FeatureStatus::Done)
@@ -558,5 +575,42 @@ mod tests {
         let mut list = sample_features();
         let result = list.claim("f999", "agent-1");
         assert!(matches!(result, Err(FeatureError::NotFound(_))));
+    }
+
+    #[test]
+    fn claimable_ids_no_deps_done() {
+        let list = sample_features();
+        // Only f001 is claimable (no deps)
+        let ids = list.claimable_ids();
+        assert_eq!(ids, vec!["f001"]);
+    }
+
+    #[test]
+    fn claimable_ids_after_done() {
+        let mut list = sample_features();
+        list.claim("f001", "agent-1").unwrap();
+        list.mark_done("f001").unwrap();
+        // f002 and f003 both depend on f001, now claimable
+        let mut ids = list.claimable_ids();
+        ids.sort();
+        assert_eq!(ids, vec!["f002", "f003"]);
+    }
+
+    #[test]
+    fn claimable_ids_empty_when_all_done() {
+        let mut list = sample_features();
+        for id in ["f001", "f002", "f003"] {
+            list.claim(id, "agent-1").ok();
+            list.mark_done(id).unwrap();
+        }
+        assert!(list.claimable_ids().is_empty());
+    }
+
+    #[test]
+    fn claimable_ids_excludes_claimed() {
+        let mut list = sample_features();
+        list.claim("f001", "agent-1").unwrap();
+        // f001 is now claimed, not pending — should not appear
+        assert!(list.claimable_ids().is_empty());
     }
 }

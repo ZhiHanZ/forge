@@ -407,18 +407,8 @@ fn cmd_status(project_dir: &PathBuf) {
         }
     };
 
-    let counts = features.status_counts();
-
-    println!("Features: {} total", counts.total);
-    println!(
-        "  {} done, {} pending, {} claimed, {} blocked",
-        counts.done, counts.pending, counts.claimed, counts.blocked
-    );
-
-    if counts.total > 0 {
-        let pct = (counts.done as f64 / counts.total as f64) * 100.0;
-        println!("  Progress: {pct:.0}%");
-    }
+    let dag = render_feature_dag(&features);
+    print!("{dag}");
 
     // Load context
     let ctx = context::ContextManager::new(project_dir);
@@ -428,29 +418,292 @@ fn cmd_status(project_dir: &PathBuf) {
             if total > 0 {
                 println!();
                 println!("Context: {total} entries");
-                for (cat, count) in &ctx_counts {
-                    if *count > 0 {
-                        println!("  {cat}: {count}");
-                    }
+                let parts: Vec<String> = ctx_counts
+                    .iter()
+                    .filter(|(_, count)| **count > 0)
+                    .map(|(cat, count)| format!("{cat}: {count}"))
+                    .collect();
+                if !parts.is_empty() {
+                    println!("  {}", parts.join(", "));
                 }
             }
         }
         Err(_) => {}
     }
+}
 
-    // Show blocked features
-    let blocked: Vec<_> = features
-        .features
-        .iter()
-        .filter(|f| f.status == features::FeatureStatus::Blocked)
-        .collect();
+fn render_feature_dag(features: &features::FeatureList) -> String {
+    use features::{FeatureStatus, FeatureType};
 
-    if !blocked.is_empty() {
-        println!();
-        println!("Blocked features:");
-        for f in blocked {
-            let reason = f.blocked_reason.as_deref().unwrap_or("no reason given");
-            println!("  {} — {reason}", f.id);
+    let counts = features.status_counts();
+    let mut out = String::new();
+
+    // Header
+    out.push_str(&format!(
+        "Features: {} total ({} done, {} claimed, {} pending",
+        counts.total, counts.done, counts.claimed, counts.pending
+    ));
+    if counts.blocked > 0 {
+        out.push_str(&format!(", {} blocked", counts.blocked));
+    }
+    out.push_str(")\n");
+
+    if counts.total > 0 {
+        let pct = (counts.done as f64 / counts.total as f64) * 100.0;
+        out.push_str(&format!("Progress: {pct:.0}%\n"));
+    }
+
+    if features.features.is_empty() {
+        return out;
+    }
+
+    let claimable_ids = features.claimable_ids();
+
+    // Partition features into display groups, each sorted by priority
+    let mut done: Vec<&features::Feature> = Vec::new();
+    let mut claimed: Vec<&features::Feature> = Vec::new();
+    let mut claimable: Vec<&features::Feature> = Vec::new();
+    let mut pending_blocked_deps: Vec<&features::Feature> = Vec::new();
+    let mut blocked: Vec<&features::Feature> = Vec::new();
+
+    for f in &features.features {
+        match f.status {
+            FeatureStatus::Done => done.push(f),
+            FeatureStatus::Claimed => claimed.push(f),
+            FeatureStatus::Blocked => blocked.push(f),
+            FeatureStatus::Pending => {
+                if claimable_ids.contains(&f.id.as_str()) {
+                    claimable.push(f);
+                } else {
+                    pending_blocked_deps.push(f);
+                }
+            }
         }
+    }
+
+    done.sort_by_key(|f| f.priority);
+    claimed.sort_by_key(|f| f.priority);
+    claimable.sort_by_key(|f| f.priority);
+    pending_blocked_deps.sort_by_key(|f| f.priority);
+    blocked.sort_by_key(|f| f.priority);
+
+    out.push('\n');
+
+    let type_tag = |t: &FeatureType| -> &str {
+        match t {
+            FeatureType::Implement => "impl",
+            FeatureType::Review => "review",
+            FeatureType::Poc => "poc",
+        }
+    };
+
+    let truncate = |s: &str, max: usize| -> String {
+        if s.len() <= max {
+            s.to_string()
+        } else {
+            format!("{}...", &s[..max - 3])
+        }
+    };
+
+    let first_claimable = claimable.first().map(|f| f.id.as_str());
+
+    // Render each group
+    for f in &done {
+        out.push_str(&format!(
+            "  \u{2713} {} [{}]  {}\n",
+            f.id,
+            type_tag(&f.feature_type),
+            truncate(&f.description, 50)
+        ));
+    }
+
+    for f in &claimed {
+        let agent = f.claimed_by.as_deref().unwrap_or("?");
+        out.push_str(&format!(
+            "  \u{29D7} {} [{}]  {}  ({})\n",
+            f.id,
+            type_tag(&f.feature_type),
+            truncate(&f.description, 50),
+            agent
+        ));
+        // Show deps for non-done features
+        if !f.depends_on.is_empty() {
+            out.push_str(&format!("    \u{2190} {}\n", f.depends_on.join(", ")));
+        }
+    }
+
+    for f in &claimable {
+        let indicator = if Some(f.id.as_str()) == first_claimable {
+            "\u{25B8}"
+        } else {
+            "\u{25B8}"
+        };
+        out.push_str(&format!(
+            "  {} {} [{}]  {}\n",
+            indicator,
+            f.id,
+            type_tag(&f.feature_type),
+            truncate(&f.description, 50)
+        ));
+        if !f.depends_on.is_empty() {
+            out.push_str(&format!("    \u{2190} {}\n", f.depends_on.join(", ")));
+        }
+    }
+
+    for f in &pending_blocked_deps {
+        out.push_str(&format!(
+            "  \u{00B7} {} [{}]  {}\n",
+            f.id,
+            type_tag(&f.feature_type),
+            truncate(&f.description, 50)
+        ));
+        if !f.depends_on.is_empty() {
+            out.push_str(&format!("    \u{2190} {}\n", f.depends_on.join(", ")));
+        }
+    }
+
+    for f in &blocked {
+        let reason = f.blocked_reason.as_deref().unwrap_or("");
+        out.push_str(&format!(
+            "  \u{2717} {} [{}]  {}\n",
+            f.id,
+            type_tag(&f.feature_type),
+            truncate(&f.description, 50)
+        ));
+        if !reason.is_empty() {
+            out.push_str(&format!("    blocked: {reason}\n"));
+        }
+        if !f.depends_on.is_empty() {
+            out.push_str(&format!("    \u{2190} {}\n", f.depends_on.join(", ")));
+        }
+    }
+
+    // Next claimable line
+    if let Some(next_id) = first_claimable {
+        out.push_str(&format!("\nNext claimable: {next_id}\n"));
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use features::{Feature, FeatureList, FeatureStatus, FeatureType};
+
+    fn make_feature(id: &str, ft: FeatureType, desc: &str, deps: Vec<String>, priority: u32) -> Feature {
+        Feature {
+            id: id.into(),
+            feature_type: ft,
+            scope: "test".into(),
+            description: desc.into(),
+            verify: format!("./scripts/verify/{id}.sh"),
+            depends_on: deps,
+            priority,
+            status: FeatureStatus::Pending,
+            claimed_by: None,
+            blocked_reason: None,
+            context_hints: vec![],
+        }
+    }
+
+    #[test]
+    fn dag_empty_features() {
+        let list = FeatureList { features: vec![] };
+        let out = render_feature_dag(&list);
+        assert!(out.contains("0 total"));
+        assert!(out.contains("0 done"));
+        // Should not panic
+    }
+
+    #[test]
+    fn dag_all_done() {
+        let mut list = FeatureList {
+            features: vec![
+                make_feature("f001", FeatureType::Implement, "Create User struct", vec![], 1),
+                make_feature("f002", FeatureType::Implement, "Add login endpoint", vec!["f001".into()], 2),
+            ],
+        };
+        for f in &mut list.features {
+            f.status = FeatureStatus::Done;
+        }
+        let out = render_feature_dag(&list);
+        assert!(out.contains("2 done"));
+        assert!(out.contains("Progress: 100%"));
+        assert!(out.contains("\u{2713} f001"));
+        assert!(out.contains("\u{2713} f002"));
+        // No "Next claimable" when all done
+        assert!(!out.contains("Next claimable"));
+    }
+
+    #[test]
+    fn dag_mixed_states() {
+        let mut list = FeatureList {
+            features: vec![
+                make_feature("f001", FeatureType::Implement, "Create User struct", vec![], 1),
+                make_feature("p001", FeatureType::Poc, "Validate thrift parsing", vec![], 1),
+                make_feature("f002", FeatureType::Implement, "Add login endpoint", vec!["f001".into()], 2),
+                make_feature("f003", FeatureType::Review, "Review data-model boundaries", vec!["f001".into()], 3),
+                make_feature("f004", FeatureType::Implement, "Add user validation", vec!["f002".into(), "f003".into()], 4),
+            ],
+        };
+        // f001 done, p001 done, f002 claimed
+        list.features[0].status = FeatureStatus::Done;
+        list.features[1].status = FeatureStatus::Done;
+        list.features[2].status = FeatureStatus::Claimed;
+        list.features[2].claimed_by = Some("agent-1".into());
+
+        let out = render_feature_dag(&list);
+        // Header
+        assert!(out.contains("5 total (2 done, 1 claimed, 2 pending)"));
+        assert!(out.contains("Progress: 40%"));
+        // Done features with checkmark
+        assert!(out.contains("\u{2713} f001 [impl]"));
+        assert!(out.contains("\u{2713} p001 [poc]"));
+        // Claimed feature with hourglass
+        assert!(out.contains("\u{29D7} f002 [impl]"));
+        assert!(out.contains("(agent-1)"));
+        // f003 is claimable (pending, f001 done)
+        assert!(out.contains("\u{25B8} f003 [review]"));
+        // f004 pending with unmet deps
+        assert!(out.contains("\u{00B7} f004 [impl]"));
+        assert!(out.contains("\u{2190} f002, f003"));
+        // Next claimable
+        assert!(out.contains("Next claimable: f003"));
+    }
+
+    #[test]
+    fn dag_blocked_feature() {
+        let mut list = FeatureList {
+            features: vec![
+                make_feature("f001", FeatureType::Implement, "Create User struct", vec![], 1),
+            ],
+        };
+        list.features[0].status = FeatureStatus::Blocked;
+        list.features[0].blocked_reason = Some("stuck on compile error".into());
+
+        let out = render_feature_dag(&list);
+        assert!(out.contains("\u{2717} f001 [impl]"));
+        assert!(out.contains("blocked: stuck on compile error"));
+    }
+
+    #[test]
+    fn dag_truncates_long_description() {
+        let list = FeatureList {
+            features: vec![
+                make_feature(
+                    "f001",
+                    FeatureType::Implement,
+                    "This is a very long description that exceeds fifty characters and should be truncated",
+                    vec![],
+                    1,
+                ),
+            ],
+        };
+        let out = render_feature_dag(&list);
+        // Description should be truncated to 50 chars with "..."
+        assert!(out.contains("..."));
+        // Should not contain the full description
+        assert!(!out.contains("should be truncated"));
     }
 }
