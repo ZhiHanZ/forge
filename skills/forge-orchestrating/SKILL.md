@@ -64,6 +64,35 @@ Flag specific violations:
 - Cross-scope imports only through API?
 - No direct access to another scope's internals?
 
+### P5 — Completeness (verify ↔ description alignment)
+
+**This is the most critical check.** A feature that passes P1-P4 but fails P5 is
+falsely "done" — the verify script passes but the actual requirement is unmet.
+
+For EVERY feature reviewed:
+1. Read the feature's **description** in features.json — identify each concrete requirement
+2. Read the feature's **verify script** — identify what it actually tests
+3. For each description requirement: is there a corresponding verify check?
+4. Flag **UNCOVERED** requirements with specific callouts
+
+For **review features (milestones)** — apply additional checks:
+- Are ALL condition features listed in `depends_on`? If the milestone review or a previous
+  adjustment created follow-up features as conditions, those MUST be in `depends_on`.
+  A milestone without its conditions in `depends_on` can be marked "done" prematurely.
+- Does the verify script test the milestone's actual integration gate? Or does it only
+  test lint (`cargo build/test/fmt/clippy`)? A milestone claiming "end-to-end query works"
+  but verifying only `cargo test` is a **critical gap**.
+- If a milestone was marked "done" with unmet conditions (prose like "CONDITIONAL PASS",
+  "follow-ups required", etc.) — this is a **FAIL**. The system has 4 states:
+  pending, claimed, done, blocked. "Conditional" is not a state. Flag it immediately.
+
+**P5 overrides other passes**: A feature with P1-P4 OK but P5 FAIL must be flagged as
+`WARN — verify-incomplete` in the review. Recommend either:
+- Strengthen the verify script to cover the gap, OR
+- Create follow-up features for uncovered requirements and add them to `depends_on`
+
+Write a gotcha if the gap is systemic: `context/gotchas/verify-gap-{feature_id}.md`
+
 ## Phase 4: Review session tactics
 
 Read `feedback/exec-memory/{feature_id}.json` — the executor's tactical record.
@@ -152,6 +181,7 @@ Write `feedback/session-review.md`:
 - P2 Proof: WARN — f002 tests missing edge case for empty input
 - P3 Style: OK
 - P4 Boundaries: OK
+- P5 Completeness: WARN — r001 verify only checks cargo test, description requires Docker e2e
 
 ### Tactics Assessment
 - f001: approach sound, insights useful for downstream (f002 depends on f001)

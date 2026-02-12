@@ -66,6 +66,25 @@ Principle enforcement for new features:
 - POC verify scripts check for `context/poc/{id}.md` (P2)
 - New scopes: add to forge.toml first, then reference in features
 
+### Milestone integrity rules
+
+When modifying or creating review features (milestones):
+
+- **Never invent statuses**: No "CONDITIONAL PASS", "PARTIAL", or other custom states.
+  The system has 4 states: pending, claimed, done, blocked. Use them. If a milestone has
+  conditions, those conditions are features in `depends_on` — not prose in a review document.
+- **Conditions must be features**: If a milestone review or adjustment identifies conditions
+  for completion, each condition MUST become a feature with its own verify script, and the
+  milestone's `depends_on` MUST include it. Prose conditions are unenforceable.
+- **Unmet conditions = not done**: If a milestone's conditions are unmet, set it to `pending`
+  (if condition features exist in `depends_on` and the system will gate it) or `blocked`
+  (if condition features don't exist yet and need to be created). Never `done`.
+- **Verify must match description**: Review feature verify scripts must test the actual
+  integration gate described, not just `cargo build/test/fmt/clippy`. If the description
+  says "end-to-end query works", the verify script must test that path.
+- **Traceability**: After modifications, present a traceability matrix for each affected
+  milestone showing: requirement → delivering feature → verify coverage. Empty cells = gap.
+
 ## Phase 5: Validate
 
 - All `depends_on` references point to valid feature IDs

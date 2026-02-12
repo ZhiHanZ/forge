@@ -97,6 +97,51 @@ Feature types:
 - `review` — check boundaries, update docs, verify with lint + import checks. Use `r` prefix IDs.
 - `poc` — prototype to resolve unknowns. Use `p` prefix IDs.
 
+### Review features are milestone gates
+
+Review features (`type: "review"`) verify that a set of implementation features
+collectively delivers a capability. They are the only mechanism for milestone enforcement.
+Apply these rules strictly — a broken milestone gate means false completion:
+
+1. **Numbered requirements in description**: The description must list explicit, testable
+   requirements — not prose. Each requirement is a statement that can be checked by the
+   verify script or a dependent feature.
+
+2. **Every requirement traces to a feature**: Each requirement must be delivered by at least
+   one implementation feature. If a requirement has no delivering feature, create the feature
+   or drop the requirement. No orphan requirements.
+
+3. **`depends_on` must be complete**: The review feature MUST depend on ALL features that
+   deliver its requirements. A milestone that doesn't depend on its condition features can
+   be claimed and marked "done" while conditions are unmet — this is the #1 cause of false
+   milestone completion.
+
+4. **Verify script tests the actual gate**: The verify script must check the milestone's
+   integration requirements, not just run `cargo build/test/fmt/clippy`. If the milestone
+   says "system serves queries end-to-end", the verify script must test that path.
+
+Bad example — milestone passes without delivering its promise:
+```json
+{
+  "id": "r001",
+  "description": "M1: system serves queries end-to-end",
+  "depends_on": ["f001", "f002"],
+  "verify": "./scripts/verify/r001.sh"
+}
+```
+(verify script: `cargo build && cargo test && cargo fmt --check` — never tests end-to-end)
+
+Good example — milestone enforces what it claims:
+```json
+{
+  "id": "r001",
+  "description": "M1 milestone:\n1. Binary starts and accepts connections on port 9030\n2. SELECT 1 returns correct result through our FE\n3. Docker compose includes our service container\n4. cargo fmt + clippy clean",
+  "depends_on": ["f001", "f002", "f003", "f004"],
+  "verify": "./scripts/verify/r001.sh"
+}
+```
+(verify script tests each numbered requirement; depends_on includes ALL delivery features)
+
 ### `context_hints` — push context, don't make agents pull
 
 For each feature, list the context entries the agent should read. Format: `"category/slug"`.
@@ -137,6 +182,46 @@ cargo clippy -- -D warnings || exit 1
 - Check scope boundary imports (no internal cross-scope access)
 - Verify API surface matches design doc
 
+**P2 (Proof) — review features (milestones) — CRITICAL:**
+- Verify script must test EVERY numbered requirement in the description
+- For integration milestones: test the actual integration path, not just that components build
+- If a requirement needs Docker/infra: verify script must at minimum check the infrastructure
+  exists (compose file present, binary builds and runs, config files valid)
+- NEVER use generic `cargo build && cargo test && cargo fmt --check` for a milestone whose
+  description requires specific integration behavior — that's a verify-description gap
+- Each numbered requirement should map to a section in the verify script with a comment:
+  ```bash
+  # Requirement 1: binary accepts connections
+  cargo build --bin my-service
+  timeout 5 ./target/debug/my-service --check || exit 1
+  # Requirement 2: SELECT 1 works end-to-end
+  ...
+  ```
+
+## Phase 3.5: Validate milestone traceability
+
+Before writing verify scripts, validate that review features form a complete gate.
+
+For each review feature:
+1. List its numbered requirements (from description)
+2. Map each requirement → implementation feature(s) that deliver it
+3. Confirm ALL mapped features are in `depends_on`
+4. Flag any requirement with no delivering feature — create the feature or drop the requirement
+
+Present the traceability matrix to the user before proceeding:
+
+```markdown
+### r001: M1 Milestone
+| # | Requirement | Delivered by | Verified by |
+|---|-------------|-------------|-------------|
+| 1 | Binary accepts connections | f003 | r001.sh: connection test |
+| 2 | SELECT 1 end-to-end | f004 | r001.sh: query test |
+| 3 | Docker compose includes service | f002 | r001.sh: compose check |
+| 4 | Code quality clean | f001-f004 | r001.sh: fmt + clippy |
+```
+
+If any cell is empty, the plan is incomplete. Fix before proceeding.
+
 ## Phase 5: DESIGN.md unknowns format
 
 Use checkboxes to track unknowns:
@@ -157,6 +242,9 @@ Each unknown should reference a POC feature ID when one exists:
 2. Review the full features.json with the user
 3. Confirm dependency ordering makes sense
 4. Ensure every feature has a verify script that actually tests its deliverable
+5. **Milestone traceability check**: For each review feature, confirm the traceability matrix
+   from Phase 3.5 is complete — every requirement has a delivering feature, every delivering
+   feature is in `depends_on`, and the verify script tests each requirement
 
 ## Priority ordering
 

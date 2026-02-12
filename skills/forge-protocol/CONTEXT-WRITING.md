@@ -77,6 +77,14 @@ downstream features get your tactics, not just your code.
       "discoveries": ["List of things learned during this attempt"]
     }
   ],
+  "delivery": [
+    {
+      "requirement": "The description requirement this proves",
+      "implemented_in": "src/parser.rs:42-85",
+      "tested_by": "parse_rejects_invalid_version (src/parser.rs:200)",
+      "verified_by": "verify/f001.sh line 8: cargo test parse_rejects"
+    }
+  ],
   "tactics": {
     "context_used": ["context/decisions/use-vec.md", "context/references/memory-mgmt.md"],
     "key_files_read": ["src/parser.rs", "src/model.rs"],
@@ -98,3 +106,12 @@ downstream features get your tactics, not just your code.
 - `test_strategy` — how you verified correctness, not just "ran tests"
 - `insights` — actionable facts that would save the next agent 10+ minutes
 - `performance_notes` — optional, only if you measured something
+
+**Delivery proof rules:**
+- One entry per description requirement — no requirement left unmapped
+- `implemented_in` — file:line range where the implementation lives
+- `tested_by` — specific test name that proves this requirement works
+- `verified_by` — which line in the verify script checks this
+- If a requirement has no test or no verify coverage, explain why in `insights`
+- The orchestrating reviewer audits this section against the actual diff —
+  fake or vague entries will be flagged

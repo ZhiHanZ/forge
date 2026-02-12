@@ -14,7 +14,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use tui_term::widget::{Cursor, PseudoTerminal};
 
 use crate::config::RoleSpec;
-use crate::features::{FeatureList, StatusCounts};
+use crate::features::{FeatureList, FeatureType, StatusCounts};
 use crate::runner::{self, RunConfig};
 
 /// Mark an FD as close-on-exec so it doesn't leak to child processes.
@@ -46,6 +46,8 @@ struct PtyPane {
     feature_id: Option<String>,
     agent_id: String,
     last_size: (u16, u16),
+    feature_priority: Option<u32>,
+    feature_type: Option<FeatureType>,
 }
 
 impl PtyPane {
@@ -190,6 +192,8 @@ impl PtyPane {
             feature_id,
             agent_id,
             last_size: (rows, cols),
+            feature_priority: None,
+            feature_type: None,
         })
     }
 
@@ -254,39 +258,52 @@ fn spawn_pty_agent(
 }
 
 /// Open a new pane for the next claimable feature.
+/// When `completed_id` is provided, prefers features that depend on it (DAG-first).
 fn open_next_feature_pane(
     panes: &mut Vec<PtyPane>,
     active_pane: &mut Option<usize>,
     inner_rows: u16,
     inner_cols: u16,
     config: &RunConfig,
+    completed_id: Option<&str>,
+    next_agent_id: &mut u32,
 ) -> Option<String> {
     let mut features = FeatureList::load(&config.project_dir).ok()?;
-    let next = features.next_claimable()?;
+    let next = match completed_id {
+        Some(cid) => features.next_after(cid)?,
+        None => features.next_claimable()?,
+    };
     let feature_id = next.id.clone();
+    let priority = next.priority;
+    let ftype = next.feature_type.clone();
 
-    let agent_id = format!("agent-{}", panes.len() + 1);
+    *next_agent_id += 1;
+    let agent_id = format!("agent-{next_agent_id}");
 
     // Claim the feature so other panes don't pick the same one
     let _ = features.claim(&feature_id, &agent_id);
     let _ = features.save(&config.project_dir);
-    let prompt = format!(
-        "You are a forge agent. Your assigned feature is {feature_id}. \
-         Read features.json for details. Follow the forge-protocol skill. \
-         If context/packages/{feature_id}.md exists, read it first for pre-compiled context. \
-         When done, set status to done and exit.",
-    );
+    let prompt = runner::build_agent_prompt(&config.project_dir, &feature_id);
+
+    // Use orchestrating role for review features (milestone gates benefit from
+    // a different model), protocol role for implement/poc features.
+    let role = match ftype {
+        FeatureType::Review => &config.orchestrating,
+        _ => &config.protocol,
+    };
 
     match spawn_pty_agent(
         inner_rows,
         inner_cols,
-        &config.protocol,
+        role,
         &config.project_dir,
         &prompt,
         &agent_id,
         Some(feature_id.clone()),
     ) {
-        Ok(pane) => {
+        Ok(mut pane) => {
+            pane.feature_priority = Some(priority);
+            pane.feature_type = Some(ftype);
             let idx = panes.len();
             panes.push(pane);
             *active_pane = Some(idx);
@@ -375,6 +392,8 @@ fn load_status_counts(project_dir: &Path) -> StatusCounts {
 fn render_status_bar(
     counts: &StatusCounts,
     command_mode: bool,
+    cocoindex_status: &str,
+    working_info: &str,
     area: Rect,
     frame: &mut ratatui::Frame,
 ) {
@@ -389,6 +408,18 @@ fn render_status_bar(
         counts.done, counts.total, counts.pending, counts.claimed, counts.blocked,
     );
 
+    let idx_span = if !cocoindex_status.is_empty() {
+        format!(" [idx: {}] ", cocoindex_status)
+    } else {
+        String::new()
+    };
+
+    let working_span = if !working_info.is_empty() {
+        format!(" working: {} ", working_info)
+    } else {
+        String::new()
+    };
+
     if command_mode {
         let bar = Line::from(vec![
             Span::styled(
@@ -397,6 +428,14 @@ fn render_status_bar(
                     .fg(Color::White)
                     .bg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                idx_span,
+                Style::default().fg(Color::Cyan).bg(Color::DarkGray),
+            ),
+            Span::styled(
+                working_span,
+                Style::default().fg(Color::Green).bg(Color::DarkGray),
             ),
             Span::styled(
                 " CMD ",
@@ -422,6 +461,14 @@ fn render_status_bar(
                     .fg(Color::White)
                     .bg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                idx_span,
+                Style::default().fg(Color::Cyan).bg(Color::DarkGray),
+            ),
+            Span::styled(
+                working_span,
+                Style::default().fg(Color::Green).bg(Color::DarkGray),
             ),
             Span::styled(
                 " Ctrl+G: command mode ",
@@ -507,6 +554,12 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
     let mut status_counts = load_status_counts(&config.project_dir);
     let mut status_tick = 0u32;
     let mut command_mode = false;
+    let mut next_agent_id: u32 = 0;
+
+    // CocoIndex status tracking (non-blocking)
+    #[derive(Clone, Copy, PartialEq)]
+    enum CocoStatus { Idle, Running, Done, Unavailable, Error }
+    let cocoindex_status = Arc::new(std::sync::Mutex::new(CocoStatus::Idle));
 
     // Sync CocoIndex context flow files and refresh packages
     crate::context_flow::sync_context_flow(&config.project_dir);
@@ -514,7 +567,7 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
 
     // Open first pane with estimated inner size
     let (est_rows, est_cols) = estimate_inner(term_size.height, term_size.width, 1);
-    open_next_feature_pane(&mut panes, &mut active_pane, est_rows, est_cols, config);
+    open_next_feature_pane(&mut panes, &mut active_pane, est_rows, est_cols, config, None, &mut next_agent_id);
 
     if panes.is_empty() {
         ratatui::restore();
@@ -525,6 +578,30 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
     let project_dir = config.project_dir.clone();
 
     loop {
+        // Build working info string from live panes
+        let working_info: String = panes
+            .iter()
+            .filter_map(|p| {
+                let fid = p.feature_id.as_deref()?;
+                let pri = p.feature_priority?;
+                Some(format!("{}:P{}", fid, pri))
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        // Read cocoindex status
+        let coco_str = {
+            let st = cocoindex_status.lock().unwrap();
+            match *st {
+                CocoStatus::Idle => "",
+                CocoStatus::Running => "syncing",
+                CocoStatus::Done => "ok",
+                CocoStatus::Unavailable => "",
+                CocoStatus::Error => "err",
+            }
+            .to_string()
+        };
+
         terminal.draw(|frame| {
             let outer = Layout::default()
                 .direction(Direction::Vertical)
@@ -547,9 +624,17 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
                     let chunk = grid_rect(pane_area, index, num_panes);
 
                     let pane_num = index + 1;
-                    let title = match &pane.feature_id {
-                        Some(fid) => format!(" [{}] {} — {} ", pane_num, pane.agent_id, fid),
-                        None => format!(" [{}] {} ", pane_num, pane.agent_id),
+                    let title = match (&pane.feature_id, pane.feature_priority, &pane.feature_type) {
+                        (Some(fid), Some(pri), Some(ft)) => {
+                            let type_tag = match ft {
+                                FeatureType::Implement => "impl",
+                                FeatureType::Review => "review",
+                                FeatureType::Poc => "poc",
+                            };
+                            format!(" [{}] {} — {} P{} {} ", pane_num, pane.agent_id, fid, pri, type_tag)
+                        }
+                        (Some(fid), _, _) => format!(" [{}] {} — {} ", pane_num, pane.agent_id, fid),
+                        _ => format!(" [{}] {} ", pane_num, pane.agent_id),
                     };
 
                     let is_active = Some(index) == active_pane;
@@ -584,7 +669,7 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
                 }
             }
 
-            render_status_bar(&status_counts, command_mode, status_area, frame);
+            render_status_bar(&status_counts, command_mode, &coco_str, &working_info, status_area, frame);
         })?;
 
         if event::poll(Duration::from_millis(10))? {
@@ -626,6 +711,8 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
                                     r,
                                     c,
                                     config,
+                                    None,
+                                    &mut next_agent_id,
                                 );
                             }
                             // x: close active pane
@@ -676,13 +763,30 @@ pub async fn run_tui(config: &RunConfig) -> io::Result<()> {
         let mut i = 0;
         while i < panes.len() {
             if !panes[i].is_alive() {
+                let completed_id = panes[i].feature_id.clone();
                 panes.remove(i);
-                let _ = crate::context_flow::refresh_context(&config.project_dir);
-                // Try to spawn a replacement with the next claimable feature
+                // Non-blocking cocoindex refresh
+                {
+                    let status = cocoindex_status.clone();
+                    let dir = config.project_dir.clone();
+                    std::thread::spawn(move || {
+                        *status.lock().unwrap() = CocoStatus::Running;
+                        match crate::context_flow::refresh_context(&dir) {
+                            Ok(true) => *status.lock().unwrap() = CocoStatus::Done,
+                            Ok(false) => *status.lock().unwrap() = CocoStatus::Unavailable,
+                            Err(_) => *status.lock().unwrap() = CocoStatus::Error,
+                        }
+                    });
+                }
+                // Try to spawn a replacement — prefer DAG successors of completed feature
                 let ts = terminal.size()?;
                 let nr = panes.len() as u16 + 1;
                 let (r, c) = estimate_inner(ts.height, ts.width, nr);
-                if open_next_feature_pane(&mut panes, &mut active_pane, r, c, config).is_none() {
+                if open_next_feature_pane(
+                    &mut panes, &mut active_pane, r, c, config,
+                    completed_id.as_deref(),
+                    &mut next_agent_id,
+                ).is_none() {
                     // No more features — adjust active pane index
                     if panes.is_empty() {
                         active_pane = None;
@@ -1014,6 +1118,8 @@ mod tests {
             feature_id: None,
             agent_id: agent_id.to_string(),
             last_size: (24, 80),
+            feature_priority: None,
+            feature_type: None,
         }
     }
 
@@ -1109,7 +1215,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                render_status_bar(counts, command_mode, area, frame);
+                render_status_bar(counts, command_mode, "", "", area, frame);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();

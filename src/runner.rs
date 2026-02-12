@@ -56,6 +56,63 @@ fn open_log(project_dir: &Path, agent_id: &str) -> Option<std::fs::File> {
     fs::File::create(log_dir.join(format!("{agent_id}.log"))).ok()
 }
 
+/// Build the agent prompt for a feature.
+/// If a context package exists, embeds its contents directly so the agent
+/// doesn't need to explore the codebase for pre-compiled context.
+pub fn build_agent_prompt(project_dir: &Path, feature_id: &str) -> String {
+    let package_path = project_dir.join(format!("context/packages/{feature_id}.md"));
+    let context_block = std::fs::read_to_string(&package_path).unwrap_or_default();
+
+    if context_block.is_empty() {
+        format!(
+            "You are a forge agent. Your assigned feature is {feature_id}. \
+             Read features.json for details. Follow the forge-protocol skill. \
+             When done, set status to done and exit.",
+        )
+    } else {
+        format!(
+            "You are a forge agent. Your assigned feature is {feature_id}. \
+             Follow the forge-protocol skill.\n\n\
+             ## Pre-compiled context (DO NOT use Explore agents — this has what you need)\n\n\
+             {context_block}\n\n\
+             Read features.json for your verify command. \
+             When done, set status to done and exit.",
+        )
+    }
+}
+
+/// Check that the agent followed protocol after its session.
+/// These are CLI-enforced gates that don't depend on the agent's self-reporting.
+fn check_protocol_compliance(project_dir: &Path, feature_id: &str) {
+    // Check 1: exec-memory was written (agent completed handoff)
+    let exec_memory = project_dir.join(format!("feedback/exec-memory/{feature_id}.json"));
+    if !exec_memory.exists() {
+        eprintln!("  WARN: No exec-memory for {feature_id} — agent skipped handoff protocol");
+    } else {
+        // Check 2: delivery proof exists in exec-memory
+        if let Ok(content) = fs::read_to_string(&exec_memory) {
+            if !content.contains("\"delivery\"") {
+                eprintln!(
+                    "  WARN: exec-memory for {feature_id} has no delivery proof — \
+                     requirements not mapped to code/tests"
+                );
+            }
+        }
+    }
+
+    // Check 3: feature status was updated (not left as "claimed")
+    if let Ok(features) = FeatureList::load(project_dir) {
+        if let Some(f) = features.features.iter().find(|f| f.id == feature_id) {
+            if f.status == FeatureStatus::Claimed {
+                eprintln!(
+                    "  WARN: {feature_id} still 'claimed' after session — \
+                     agent didn't mark done or blocked"
+                );
+            }
+        }
+    }
+}
+
 /// Run the autonomous development loop with a single agent.
 pub fn run_single_agent(config: &RunConfig) -> RunOutcome {
     let mut session = 0;
@@ -102,8 +159,8 @@ pub fn run_single_agent(config: &RunConfig) -> RunOutcome {
         }
 
         // Find next claimable feature
-        let next = match features.next_claimable() {
-            Some(f) => f.id.clone(),
+        let (next, next_type) = match features.next_claimable() {
+            Some(f) => (f.id.clone(), f.feature_type.clone()),
             None => {
                 eprintln!("No claimable features (all blocked or claimed)");
                 let remaining = features
@@ -129,16 +186,17 @@ pub fn run_single_agent(config: &RunConfig) -> RunOutcome {
         println!("  Feature: {next}");
 
         // --- Phase 1: Executor ---
-        let prompt = format!(
-            "You are a forge agent. Your assigned feature is {next}. \
-             Read features.json for details. Follow the forge-protocol skill. \
-             If context/packages/{next}.md exists, read it first for pre-compiled context. \
-             When done, set status to done and exit.",
-        );
+        // Use orchestrating role for review features (milestone gates),
+        // protocol role for implement/poc features.
+        let role = match next_type {
+            crate::features::FeatureType::Review => &config.orchestrating,
+            _ => &config.protocol,
+        };
+        let prompt = build_agent_prompt(&config.project_dir, &next);
 
         let mut log = open_log(&config.project_dir, "agent-1");
 
-        match spawn_agent(&config.protocol, &config.project_dir, &prompt, "agent-1") {
+        match spawn_agent(role, &config.project_dir, &prompt, "agent-1") {
             Ok(mut child) => {
                 if let Some(stdout) = child.stdout.take() {
                     let reader = BufReader::new(stdout);
@@ -165,6 +223,9 @@ pub fn run_single_agent(config: &RunConfig) -> RunOutcome {
                 return RunOutcome::SpawnError(e);
             }
         }
+
+        // --- Phase 1.5: Protocol compliance checks ---
+        check_protocol_compliance(&config.project_dir, &next);
 
         // --- Phase 2: Verify ---
         println!("  Running post-session verify...");
@@ -316,10 +377,16 @@ pub fn run_multi_agent(config: &RunConfig) -> RunOutcome {
             Err(e) => eprintln!("  Context refresh warning: {e}"),
         }
 
-        let feature_ids: Vec<String> = claimable.iter().map(|f| f.id.clone()).collect();
+        let feature_entries: Vec<(String, crate::features::FeatureType)> = claimable
+            .iter()
+            .map(|f| (f.id.clone(), f.feature_type.clone()))
+            .collect();
 
-        println!("--- Session {session} ({} agents) ---", feature_ids.len());
-        for fid in &feature_ids {
+        println!(
+            "--- Session {session} ({} agents) ---",
+            feature_entries.len()
+        );
+        for (fid, _) in &feature_entries {
             println!("  Feature: {fid}");
         }
 
@@ -328,8 +395,9 @@ pub fn run_multi_agent(config: &RunConfig) -> RunOutcome {
         let _ = fs::create_dir_all(&wt_base);
 
         let mut handles = Vec::new();
+        let feature_ids: Vec<String> = feature_entries.iter().map(|(id, _)| id.clone()).collect();
 
-        for (i, feature_id) in feature_ids.iter().enumerate() {
+        for (i, (feature_id, ftype)) in feature_entries.iter().enumerate() {
             let agent_id = format!("agent-{}", i + 1);
             let branch = format!("forge/{agent_id}");
             let wt_dir = wt_base.join(&agent_id);
@@ -344,14 +412,13 @@ pub fn run_multi_agent(config: &RunConfig) -> RunOutcome {
                 continue;
             }
 
-            let prompt = format!(
-                "You are a forge agent. Your assigned feature is {feature_id}. \
-                 Read features.json for details. Follow the forge-protocol skill. \
-                 If context/packages/{feature_id}.md exists, read it first for pre-compiled context. \
-                 When done, set status to done and exit.",
-            );
+            let prompt = build_agent_prompt(&config.project_dir, feature_id);
 
-            let role = config.protocol.clone();
+            // Use orchestrating role for review features, protocol for implement/poc
+            let role = match ftype {
+                crate::features::FeatureType::Review => config.orchestrating.clone(),
+                _ => config.protocol.clone(),
+            };
             let wt = wt_dir.clone();
             let fid = feature_id.clone();
             let project_dir = config.project_dir.clone();
@@ -413,6 +480,11 @@ pub fn run_multi_agent(config: &RunConfig) -> RunOutcome {
             if let Err(e) = git::remove_worktree(&config.project_dir, wt_dir) {
                 eprintln!("  Failed to remove worktree for {agent_id}: {e}");
             }
+        }
+
+        // --- Protocol compliance checks ---
+        for (fid, _) in &feature_entries {
+            check_protocol_compliance(&config.project_dir, fid);
         }
 
         // --- Verify ---

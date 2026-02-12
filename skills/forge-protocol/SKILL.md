@@ -42,13 +42,50 @@ Key requirements:
 - Cover edge cases: empty inputs, boundary values, error states
 - Tests must survive refactoring of internals
 
+## Phase 3.5: Self-Audit (MANDATORY before verify)
+
+After implementation and testing, review your own work BEFORE running verify.
+This catches issues while you can still fix them — the orchestrating reviewer
+runs after your session when it's too late.
+
+1. **Run `git diff`** — read every line of your own changes
+2. **Check each description requirement** — is it implemented? Where?
+3. **Check each requirement has a test** — which test proves it works?
+4. **Check principles against your diff**:
+   - P1: Any function > 100 lines? Unclear names? Magic numbers?
+   - P2: Tests cover edge cases? Names describe behavior?
+   - P3: Run `cargo fmt --check` and `cargo clippy` now, not later
+   - P4: All changes within your scope's owned files?
+5. **Fix any gaps** before proceeding to Phase 4
+
+If you find a requirement in the description that you didn't implement:
+- Implement it now, OR
+- If it's genuinely out of scope, document why in exec-memory insights
+
 ## Phase 4: Verification
 
 1. Run the feature's verify command end-to-end
-2. If PASS → mark status `"done"` in features.json
+2. If PASS → proceed to the delivery proof below before marking done
 3. If FAIL → read error, fix, retry
 4. After 10+ attempts → mark `"blocked"` with reason, exit
 5. Only mark done when verification succeeds. Never remove tests or weaken verify.
+
+### Verify ↔ description sanity check (MANDATORY before marking done)
+
+After the verify script passes, compare the feature's **description** against what the
+verify script **actually tests**:
+
+- Does the verify script test each concrete requirement in the description?
+- For review features: does the verify script test the actual milestone gate
+  (e.g., end-to-end integration), or just code quality (cargo build/test/fmt)?
+
+If the verify script is significantly weaker than the description:
+- Do NOT mark as done
+- Mark as **blocked** with reason: `"verify script does not cover: [list uncovered requirements]"`
+- Document the gap in `feedback/exec-memory/{feature_id}.json` under `insights`
+
+You are the last line of defense. A weak verify script that passes is worse than a
+strong verify script that fails — the pass gives false confidence to everyone downstream.
 
 ## Phase 5: POC features
 
@@ -73,8 +110,10 @@ The verify script checks this file exists. A POC is done when:
 
 1. Write discoveries to `context/{decisions,gotchas,patterns}/` (see [CONTEXT-WRITING.md](CONTEXT-WRITING.md))
 2. External knowledge → `context/references/`
-3. Write execution memory with **tactics** to `feedback/exec-memory/{feature_id}.json`:
+3. Write execution memory to `feedback/exec-memory/{feature_id}.json`:
    - `attempts` — what you tried, what failed, what you discovered
+   - `delivery` — **REQUIRED**: one entry per description requirement mapping
+     requirement → implementation location → test name → verify script line
    - `tactics` — which context you used, your approach, test strategy, insights, perf notes
    - See [CONTEXT-WRITING.md](CONTEXT-WRITING.md#execution-memory) for full schema
 4. Commit all with descriptive message
