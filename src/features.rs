@@ -263,11 +263,37 @@ impl FeatureList {
             .collect()
     }
 
+    /// Extract milestone label from a review feature's description.
+    /// Looks for "M\d+" pattern (e.g. "M4 milestone review" → "M4").
+    /// Falls back to the feature id.
+    pub fn milestone_label(feature: &Feature) -> String {
+        for word in feature.description.split_whitespace() {
+            if word.starts_with('M')
+                && word.len() >= 2
+                && word[1..].chars().all(|c| c.is_ascii_digit() || c == '-')
+            {
+                return word.to_string();
+            }
+        }
+        feature.id.clone()
+    }
+
+    /// Extract milestone sort key from label: "M4" → 4, "M2-PG" → 2.
+    fn milestone_sort_key(label: &str) -> u32 {
+        label
+            .trim_start_matches('M')
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .unwrap_or(u32::MAX)
+    }
+
     /// Return claimable features grouped by the earliest milestone they unblock.
-    /// Milestones are review features, sorted by priority (nearest first).
-    /// Each entry is (milestone_id, vec_of_claimable_ids_sorted_by_priority).
-    /// Features not in any milestone's dep tree are returned under milestone_id = "".
-    pub fn milestone_claimable(&self) -> Vec<(&str, Vec<&str>)> {
+    /// Milestones are review features, ordered by milestone number (M3→M4→M5).
+    /// Each entry is (milestone_label, vec_of_claimable_ids_sorted_by_priority).
+    /// Features not in any milestone's dep tree are returned under label = "".
+    pub fn milestone_claimable(&self) -> Vec<(String, Vec<&str>)> {
         use std::collections::{HashMap, HashSet, VecDeque};
 
         let claimable_set: HashSet<&str> = self.claimable_ids().into_iter().collect();
@@ -278,13 +304,16 @@ impl FeatureList {
         let feature_map: HashMap<&str, &Feature> =
             self.features.iter().map(|f| (f.id.as_str(), f)).collect();
 
-        // Milestones: incomplete review features sorted by priority
+        // Milestones: incomplete review features sorted by milestone number (M3<M4<M5)
         let mut milestones: Vec<&Feature> = self
             .features
             .iter()
             .filter(|f| f.feature_type == FeatureType::Review && f.status != FeatureStatus::Done)
             .collect();
-        milestones.sort_by_key(|f| f.priority);
+        milestones.sort_by_key(|f| {
+            let label = Self::milestone_label(f);
+            Self::milestone_sort_key(&label)
+        });
 
         let mut result = Vec::new();
         let mut assigned: HashSet<&str> = HashSet::new();
@@ -314,7 +343,8 @@ impl FeatureList {
             frontier
                 .sort_by_key(|id| feature_map.get(id).map(|f| f.priority).unwrap_or(u32::MAX));
             if !frontier.is_empty() {
-                result.push((ms.id.as_str(), frontier));
+                let label = Self::milestone_label(ms);
+                result.push((label, frontier));
             }
         }
 
@@ -326,7 +356,7 @@ impl FeatureList {
             .collect();
         orphans.sort_by_key(|id| feature_map.get(id).map(|f| f.priority).unwrap_or(u32::MAX));
         if !orphans.is_empty() {
-            result.push(("", orphans));
+            result.push((String::new(), orphans));
         }
 
         result
@@ -757,11 +787,11 @@ mod tests {
         };
 
         let groups = list.milestone_claimable();
-        // r104 (priority 154) is the nearest milestone
-        assert_eq!(groups[0].0, "r104");
+        // M4 (r104) is the nearest milestone
+        assert_eq!(groups[0].0, "M4");
         assert_eq!(groups[0].1, vec!["f042"]);
-        // r105 (priority 179) is next
-        assert_eq!(groups[1].0, "r105");
+        // M5 (r105) is next
+        assert_eq!(groups[1].0, "M5");
         assert_eq!(groups[1].1, vec!["f065"]);
     }
 
@@ -826,8 +856,8 @@ mod tests {
         };
 
         let groups = list.milestone_claimable();
-        // f043 is claimable and transitively blocks r104 (via f044)
-        assert_eq!(groups[0].0, "r104");
+        // f043 is claimable and transitively blocks M4 (via f044)
+        assert_eq!(groups[0].0, "M4");
         assert_eq!(groups[0].1, vec!["f043"]);
     }
 }

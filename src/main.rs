@@ -783,9 +783,9 @@ mod tests {
         let out = render_feature_dag(&list);
 
         // M4 features shown first in "Next up", labeled with milestone
-        assert!(out.contains("Next up (r104): f042, f043"));
+        assert!(out.contains("Next up (M4): f042, f043"));
         // M5 features shown separately
-        assert!(out.contains("Next up (r105): f065"));
+        assert!(out.contains("Next up (M5): f065"));
         // Orphan shown without milestone label
         assert!(out.contains("Next up: f099"));
 
@@ -821,8 +821,8 @@ mod tests {
         list.features[0].status = FeatureStatus::Done; // f030
 
         let out = render_feature_dag(&list);
-        // f043 is claimable and transitively blocks r104
-        assert!(out.contains("Next up (r104): f043"));
+        // f043 is claimable and transitively blocks M4
+        assert!(out.contains("Next up (M4): f043"));
         assert!(out.contains("\u{25B8} f043"));
     }
 }
