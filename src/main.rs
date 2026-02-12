@@ -476,6 +476,38 @@ fn render_feature_dag(features: &features::FeatureList) -> String {
         FeatureList::milestone_sort_key(&label)
     });
 
+    // Extract a short description from a milestone's full description.
+    // Tries: (1) name between "M\d+" label and "review" (e.g. "Foundation"),
+    //        (2) gate description after "review." until ":" or "." (e.g. "Docker gate").
+    let milestone_desc = |desc: &str, label: &str| -> String {
+        // Strategy 1: text between label and "review"
+        if let Some(start) = desc.find(label) {
+            let after_label = &desc[start + label.len()..];
+            let trimmed = after_label.trim();
+            if let Some(pos) = trimmed.to_lowercase().find("review") {
+                let name = trimmed[..pos].trim();
+                if !name.is_empty() && name.to_lowercase() != "milestone" {
+                    return name.to_string();
+                }
+            }
+        }
+        // Strategy 2: gate description after "review."
+        if let Some(pos) = desc.to_lowercase().find("review") {
+            let after = &desc[pos + 6..];
+            let rest = after.trim_start_matches(|c: char| c == '.' || c == ',' || c.is_whitespace());
+            if !rest.is_empty() {
+                let end = rest.find(|c: char| c == ':' || c == '.')
+                    .unwrap_or(rest.len())
+                    .min(30);
+                let short = rest[..end].trim();
+                if !short.is_empty() {
+                    return short.to_string();
+                }
+            }
+        }
+        String::new()
+    };
+
     if !milestones.is_empty() {
         out.push_str("\nMilestones:\n");
         for ms in &milestones {
@@ -508,15 +540,17 @@ fn render_feature_dag(features: &features::FeatureList) -> String {
                 "\u{00B7}" // ·
             };
 
+            let short_desc = milestone_desc(&ms.description, &label);
             let ratio = format!("{done_count}/{total}");
-            if wip_count > 0 {
-                out.push_str(&format!(
-                    "  {} {:<6} {:>5}  ({} wip)\n",
-                    indicator, label, ratio, wip_count
-                ));
-            } else {
-                out.push_str(&format!("  {} {:<6} {:>5}\n", indicator, label, ratio));
+            let mut line = format!("  {} {:<6} {:>5}", indicator, label, ratio);
+            if !short_desc.is_empty() {
+                line.push_str(&format!("  {short_desc}"));
             }
+            if wip_count > 0 {
+                line.push_str(&format!("  ({wip_count} wip)"));
+            }
+            line.push('\n');
+            out.push_str(&line);
         }
     }
 
@@ -710,8 +744,8 @@ mod tests {
                 make_feature("f002", FeatureType::Implement, "Feature B", vec![], 2),
                 make_feature("f003", FeatureType::Implement, "Feature C", vec!["f001".into()], 3),
                 make_feature("f004", FeatureType::Implement, "Feature D", vec![], 4),
-                make_feature("r101", FeatureType::Review, "M1 Foundation review", vec!["f001".into(), "f002".into()], 10),
-                make_feature("r104", FeatureType::Review, "M4 milestone review", vec!["f003".into(), "f004".into()], 20),
+                make_feature("r101", FeatureType::Review, "M1 Foundation review. Verify scaffold", vec!["f001".into(), "f002".into()], 10),
+                make_feature("r104", FeatureType::Review, "M4 milestone review. Docker oracle gate: run tests", vec!["f003".into(), "f004".into()], 20),
             ],
         };
         list.features[0].status = FeatureStatus::Done; // f001
@@ -720,12 +754,14 @@ mod tests {
         list.features[4].status = FeatureStatus::Done; // r101
 
         let out = render_feature_dag(&list);
-        // M1 done: 2/2
+        // M1 done: 2/2 with description
         assert!(out.contains("\u{2713}") && out.contains("M1"), "M1 should show done: {out}");
         assert!(out.contains("2/2"), "M1 should show 2/2: {out}");
-        // M4 partial: f004 is done (1/2 done), f003 still pending
+        assert!(out.contains("Foundation"), "M1 should show description: {out}");
+        // M4 partial: 1/2, gate description extracted
         assert!(out.contains("\u{25D0}"), "M4 should show partial: {out}");
         assert!(out.contains("1/2"), "M4 should show 1/2: {out}");
+        assert!(out.contains("Docker oracle gate"), "M4 should show gate desc: {out}");
     }
 
     #[test]
