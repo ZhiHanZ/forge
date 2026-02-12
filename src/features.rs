@@ -81,41 +81,37 @@ impl FeatureList {
         Ok(())
     }
 
-    /// Find the highest-priority pending feature whose deps are all done.
+    /// Find the next claimable feature, prioritizing features that unblock
+    /// the nearest incomplete milestone (M3→M4→M5 chain).
     pub fn next_claimable(&self) -> Option<&Feature> {
-        let done_ids: Vec<&str> = self
-            .features
-            .iter()
-            .filter(|f| f.status == FeatureStatus::Done)
-            .map(|f| f.id.as_str())
-            .collect();
-
-        self.features
-            .iter()
-            .filter(|f| f.status == FeatureStatus::Pending)
-            .filter(|f| f.depends_on.iter().all(|dep| done_ids.contains(&dep.as_str())))
-            .min_by_key(|f| f.priority)
+        let ordered = self.milestone_ordered_claimable();
+        let feature_map: std::collections::HashMap<&str, &Feature> =
+            self.features.iter().map(|f| (f.id.as_str(), f)).collect();
+        ordered.first().and_then(|id| feature_map.get(id).copied())
     }
 
-    /// Find up to N highest-priority pending features whose deps are all done.
+    /// Find up to N claimable features, prioritizing features that unblock
+    /// the nearest incomplete milestone (M3→M4→M5 chain).
     pub fn next_n_claimable(&self, n: usize) -> Vec<&Feature> {
-        let done_ids: Vec<&str> = self
-            .features
-            .iter()
-            .filter(|f| f.status == FeatureStatus::Done)
-            .map(|f| f.id.as_str())
-            .collect();
+        let ordered = self.milestone_ordered_claimable();
+        let feature_map: std::collections::HashMap<&str, &Feature> =
+            self.features.iter().map(|f| (f.id.as_str(), f)).collect();
+        ordered
+            .into_iter()
+            .filter_map(|id| feature_map.get(id).copied())
+            .take(n)
+            .collect()
+    }
 
-        let mut claimable: Vec<&Feature> = self
-            .features
-            .iter()
-            .filter(|f| f.status == FeatureStatus::Pending)
-            .filter(|f| f.depends_on.iter().all(|dep| done_ids.contains(&dep.as_str())))
-            .collect();
-
-        claimable.sort_by_key(|f| f.priority);
-        claimable.truncate(n);
-        claimable
+    /// Return all claimable feature IDs in milestone-priority order.
+    /// Features blocking earlier milestones come first; within a milestone,
+    /// sorted by priority. Orphans (not in any milestone) come last.
+    fn milestone_ordered_claimable(&self) -> Vec<&str> {
+        let groups = self.milestone_claimable();
+        groups
+            .into_iter()
+            .flat_map(|(_, ids)| ids)
+            .collect()
     }
 
     /// Claim a feature for an agent. Returns error if already claimed or deps not met.
@@ -213,7 +209,7 @@ impl FeatureList {
 
     /// Find the next feature to work on after completing `completed_id`.
     /// Prefers features whose depends_on includes `completed_id` (just-unblocked),
-    /// then falls back to global priority order.
+    /// then falls back to milestone-aware ordering.
     pub fn next_after(&self, completed_id: &str) -> Option<&Feature> {
         let done_ids: Vec<&str> = self
             .features
@@ -222,7 +218,7 @@ impl FeatureList {
             .map(|f| f.id.as_str())
             .collect();
 
-        let claimable = |f: &&Feature| -> bool {
+        let is_claimable = |f: &&Feature| -> bool {
             f.status == FeatureStatus::Pending
                 && f.depends_on.iter().all(|dep| done_ids.contains(&dep.as_str()))
         };
@@ -231,7 +227,7 @@ impl FeatureList {
         let unblocked = self
             .features
             .iter()
-            .filter(claimable)
+            .filter(is_claimable)
             .filter(|f| f.depends_on.iter().any(|dep| dep == completed_id))
             .min_by_key(|f| f.priority);
 
@@ -239,11 +235,8 @@ impl FeatureList {
             return unblocked;
         }
 
-        // Fallback: global priority order
-        self.features
-            .iter()
-            .filter(claimable)
-            .min_by_key(|f| f.priority)
+        // Fallback: milestone-aware ordering
+        self.next_claimable()
     }
 
     /// Return IDs of all currently claimable features (pending with all deps done).
